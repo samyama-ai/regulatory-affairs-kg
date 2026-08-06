@@ -1,0 +1,7 @@
+server:
+  name: regulatory-affairs-kg
+  description: Query the regulatory affairs knowledge graph
+graph:
+  host: 127.0.0.1
+  port: 8080
+  tenant: regulatory-affairs
