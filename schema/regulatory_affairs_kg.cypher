@@ -7,41 +7,75 @@
 //   TIER 1  populated from openFDA and the 510(k) Summary PDFs
 //   TIER 2  modelled, not yet populated (no source identified or not yet ingested)
 //
+// SYNTAX — every statement here has been executed against Samyama-Graph 1.1.0
+// (see tests/test_schema_cypher.py). Constraints use the `ON (n:L) ASSERT`
+// form: the Neo4j-5 `CREATE CONSTRAINT <name> IF NOT EXISTS FOR (n:L) REQUIRE`
+// form does NOT parse in 1.1.0, despite appearing in the engine's
+// CYPHER_COMPATIBILITY.md. Do not "modernise" these back.
+//
+// A constraint here is a DECLARATION OF THE KEY, not an insert guard —
+// 1.1.0 does not reject a duplicate CREATE. Loaders must MERGE on the key.
+//
 // =============================================================================
 // TIER 1 — uniqueness constraints on populated labels
 // =============================================================================
 
 // Submission — a 510(k), PMA or De Novo. Decision is a property, not a separate
 // node: one source record carries both date_received and decision_date.
-CREATE CONSTRAINT submission_id      IF NOT EXISTS FOR (s:Submission)      REQUIRE s.id IS UNIQUE;
+//
+// Key is `id`, not k_number/pma_number, because one label carries three FDA
+// identifier namespaces. The FDA already prefixes them and they cannot collide
+// (K/DEN = 510(k) endpoint, P = PMA endpoint), so `id` is the source number
+// VERBATIM, uppercased, no synthetic prefix:
+//     K233820    510(k) clearance
+//     DEN160001  De Novo authorisation
+//     P980012    PMA approval
+// The originating number is also kept in k_number | pma_number for provenance.
+CREATE CONSTRAINT ON (s:Submission) ASSERT s.id IS UNIQUE;
 
 // ProductCode — the join hub. Every openFDA endpoint carries product_code;
 // device names vary between endpoints, product codes do not.
-CREATE CONSTRAINT productcode_code   IF NOT EXISTS FOR (p:ProductCode)     REQUIRE p.product_code IS UNIQUE;
+CREATE CONSTRAINT ON (p:ProductCode) ASSERT p.product_code IS UNIQUE;
 
 // Regulation — a 21 CFR section (e.g. 870.5150), from openfda.regulation_number.
-CREATE CONSTRAINT regulation_section IF NOT EXISTS FOR (r:Regulation)      REQUIRE r.cfr_section IS UNIQUE;
+CREATE CONSTRAINT ON (r:Regulation) ASSERT r.cfr_section IS UNIQUE;
 
-CREATE CONSTRAINT manufacturer_fei   IF NOT EXISTS FOR (m:Manufacturer)    REQUIRE m.fei_number IS UNIQUE;
-CREATE CONSTRAINT establishment_reg  IF NOT EXISTS FOR (e:Establishment)   REQUIRE e.registration_number IS UNIQUE;
+CREATE CONSTRAINT ON (m:Manufacturer) ASSERT m.fei_number IS UNIQUE;
+CREATE CONSTRAINT ON (e:Establishment) ASSERT e.registration_number IS UNIQUE;
 
 // MarketedDevice — a UDI record. Deliberately NOT merged with Submission:
 // UDI records do not reliably carry the K-number of the clearance that
 // authorised them, so no Submission -> MarketedDevice edge is asserted.
-CREATE CONSTRAINT marketeddevice_udi IF NOT EXISTS FOR (d:MarketedDevice)  REQUIRE d.udi_di IS UNIQUE;
+CREATE CONSTRAINT ON (d:MarketedDevice) ASSERT d.udi_di IS UNIQUE;
 
-CREATE CONSTRAINT recall_number      IF NOT EXISTS FOR (rc:Recall)         REQUIRE rc.recall_number IS UNIQUE;
-CREATE CONSTRAINT adverseevent_id    IF NOT EXISTS FOR (ae:AdverseEvent)   REQUIRE ae.report_number IS UNIQUE;
+// Recall — ONE node per recall_number, carrying the enforcement report as
+// properties. device/recall and device/enforcement are two views of the same
+// event sharing recall_number; modelling them as two nodes joined by an edge
+// would collide on this constraint at load time. Same argument as Submission
+// and its decision (docs/schema.md §2.3).
+CREATE CONSTRAINT ON (rc:Recall) ASSERT rc.recall_number IS UNIQUE;
+CREATE CONSTRAINT ON (ae:AdverseEvent) ASSERT ae.report_number IS UNIQUE;
 
 // PredicateClaim — the predicate as printed in the 510(k) Summary PDF, before
 // resolution. Modelled as a node so an UNRESOLVED predicate is representable:
 // predicates are free-text device names and may name a pre-1976 device with no
 // clearance record. Dropping them would make a truncated chain look complete.
-CREATE CONSTRAINT predicateclaim_id  IF NOT EXISTS FOR (pc:PredicateClaim) REQUIRE pc.id IS UNIQUE;
+//
+// id is DETERMINISTIC, not a counter — sha1("<source_k_number>|<normalised
+// raw_name>") where normalisation is casefold + collapse whitespace + strip
+// punctuation. Re-running the extractor therefore MERGEs rather than
+// duplicating, and the constraint enforces something real.
+//
+// One claim node PER CITING SUBMISSION: two clearances naming the same
+// predicate produce two PredicateClaim nodes that both RESOLVE_TO the same
+// Submission. Claims are the citation as filed, not a shared entity — so
+// ancestry (Q6) is a DAG, and "how many devices cite this predecessor" is a
+// count of incoming RESOLVES_TO.
+CREATE CONSTRAINT ON (pc:PredicateClaim) ASSERT pc.id IS UNIQUE;
 
 // Standard — identifier and clause references ONLY. ISO/IEC texts are
 // paywalled and are never ingested.
-CREATE CONSTRAINT standard_id        IF NOT EXISTS FOR (st:Standard)       REQUIRE st.designation IS UNIQUE;
+CREATE CONSTRAINT ON (st:Standard) ASSERT st.designation IS UNIQUE;
 
 // =============================================================================
 // TIER 1 — edges
@@ -71,8 +105,10 @@ CREATE CONSTRAINT standard_id        IF NOT EXISTS FOR (st:Standard)       REQUI
 // Post-market signal (Q8) — routed through ProductCode, not device names,
 // which is what makes clustering by manufacturer or facility possible
 // (:Recall)-[:AFFECTS]->(:ProductCode|:MarketedDevice)
-// (:Recall)-[:ENFORCED_AS]->(:Recall)
 // (:AdverseEvent)-[:REPORTED_AGAINST]->(:ProductCode|:MarketedDevice)
+//
+// No ENFORCED_AS edge: the enforcement report is the same Recall node, not a
+// second one (see the constraint above).
 
 // =============================================================================
 // TIER 2 — modelled, not yet populated
@@ -81,39 +117,57 @@ CREATE CONSTRAINT standard_id        IF NOT EXISTS FOR (st:Standard)       REQUI
 // Clause — paragraph-level obligation text from eCFR / EUR-Lex. Regulation is
 // section-level (from openFDA); Clause carries the prose GraphRAG retrieves.
 // Clause.text holds the obligation, Clause.embedding a 384-dim vector.
-CREATE CONSTRAINT clause_id          IF NOT EXISTS FOR (c:Clause)          REQUIRE c.id IS UNIQUE;
-CREATE CONSTRAINT guidance_id        IF NOT EXISTS FOR (g:Guidance)        REQUIRE g.id IS UNIQUE;
-CREATE CONSTRAINT jurisdiction_id    IF NOT EXISTS FOR (j:Jurisdiction)    REQUIRE j.id IS UNIQUE;
-CREATE CONSTRAINT registration_id    IF NOT EXISTS FOR (rg:Registration)   REQUIRE rg.id IS UNIQUE;
-CREATE CONSTRAINT notifiedbody_id    IF NOT EXISTS FOR (nb:NotifiedBody)   REQUIRE nb.id IS UNIQUE;
-CREATE CONSTRAINT certificate_id     IF NOT EXISTS FOR (ct:Certificate)    REQUIRE ct.id IS UNIQUE;
-CREATE CONSTRAINT technicalfile_id   IF NOT EXISTS FOR (tf:TechnicalFile)  REQUIRE tf.id IS UNIQUE;
-CREATE CONSTRAINT pmsobligation_id   IF NOT EXISTS FOR (po:PMSObligation)  REQUIRE po.id IS UNIQUE;
+CREATE CONSTRAINT ON (c:Clause) ASSERT c.id IS UNIQUE;
+CREATE CONSTRAINT ON (g:Guidance) ASSERT g.id IS UNIQUE;
+CREATE CONSTRAINT ON (j:Jurisdiction) ASSERT j.id IS UNIQUE;
+CREATE CONSTRAINT ON (rg:Registration) ASSERT rg.id IS UNIQUE;
+CREATE CONSTRAINT ON (nb:NotifiedBody) ASSERT nb.id IS UNIQUE;
+CREATE CONSTRAINT ON (ct:Certificate) ASSERT ct.id IS UNIQUE;
+CREATE CONSTRAINT ON (tf:TechnicalFile) ASSERT tf.id IS UNIQUE;
+CREATE CONSTRAINT ON (po:PMSObligation) ASSERT po.id IS UNIQUE;
 
 // Deadline is a NODE, not a date property, so "what is due in the next 90 days
 // across every obligation type" is one traversal rather than a scan per label.
-CREATE CONSTRAINT deadline_id        IF NOT EXISTS FOR (dl:Deadline)       REQUIRE dl.id IS UNIQUE;
+// The date lives in dl.due_date (ISO 8601, YYYY-MM-DD). The uniqueness
+// constraint is on id and does nothing for a date range, so the range scan
+// needs its own index — otherwise Q5 is a full label scan and the "one
+// traversal" claim is not true.
+CREATE CONSTRAINT ON (dl:Deadline) ASSERT dl.id IS UNIQUE;
+CREATE INDEX ON :Deadline(due_date);
 
 // AI governance (Q11, Q12) — shapes taken from bank-model-risk-kg rather than
 // reinvented. Model governance is domain-independent: "what was it trained on,
 // what did you assume, when was it last validated, what is still open" is the
 // same question a bank supervisor asks about a credit model.
-CREATE CONSTRAINT aimodel_id         IF NOT EXISTS FOR (am:AIModel)        REQUIRE am.id IS UNIQUE;
-CREATE CONSTRAINT trainingdataset_id IF NOT EXISTS FOR (td:TrainingDataset) REQUIRE td.id IS UNIQUE;
-CREATE CONSTRAINT assumption_id      IF NOT EXISTS FOR (a:Assumption)      REQUIRE a.id IS UNIQUE;
-CREATE CONSTRAINT validation_id      IF NOT EXISTS FOR (v:Validation)      REQUIRE v.id IS UNIQUE;
-CREATE CONSTRAINT finding_id         IF NOT EXISTS FOR (f:Finding)         REQUIRE f.id IS UNIQUE;
-CREATE CONSTRAINT control_id         IF NOT EXISTS FOR (co:Control)        REQUIRE co.id IS UNIQUE;
+CREATE CONSTRAINT ON (am:AIModel) ASSERT am.id IS UNIQUE;
+CREATE CONSTRAINT ON (td:TrainingDataset) ASSERT td.id IS UNIQUE;
+CREATE CONSTRAINT ON (a:Assumption) ASSERT a.id IS UNIQUE;
+CREATE CONSTRAINT ON (v:Validation) ASSERT v.id IS UNIQUE;
+CREATE CONSTRAINT ON (f:Finding) ASSERT f.id IS UNIQUE;
+CREATE CONSTRAINT ON (co:Control) ASSERT co.id IS UNIQUE;
 
 // Cybersecurity (Q13) — FDA premarket submissions now require an SBOM.
-CREATE CONSTRAINT softwarecomponent_id IF NOT EXISTS FOR (sc:SoftwareComponent) REQUIRE sc.id IS UNIQUE;
-CREATE CONSTRAINT vulnerability_id   IF NOT EXISTS FOR (vu:Vulnerability)  REQUIRE vu.id IS UNIQUE;
+CREATE CONSTRAINT ON (sc:SoftwareComponent) ASSERT sc.id IS UNIQUE;
+CREATE CONSTRAINT ON (vu:Vulnerability) ASSERT vu.id IS UNIQUE;
 
 // Tier-2 edges
+//
+// Endpoints here are PROVISIONAL — they are the shape the question requires,
+// and the source that will populate each is named in docs/schema.md §3. They
+// are written down rather than left out so that no Tier-2 label is declared
+// without a path to the question it serves.
 // (:Regulation)-[:HAS_CLAUSE]->(:Clause)
 // (:Registration)-[:APPLIES_IN]->(:Jurisdiction)
 // (:Certificate)-[:CERTIFIED_BY]->(:NotifiedBody)
 // (:Regulation)-[:REQUIRES_PMS]->(:PMSObligation)
+
+// Attaching edges — without these, four Tier-2 labels are unreachable and the
+// questions they exist for cannot be traversed at all.
+// (:TechnicalFile)-[:REFERENCES_STANDARD]->(:Standard)   // Q2 — the superseded-edition question
+// (:TechnicalFile)-[:DOCUMENTS]->(:Submission|:MarketedDevice)  // Q4
+// (:Guidance)-[:APPLIES_TO]->(:ProductCode|:Regulation)  // Q3
+// (:Registration)-[:REGISTERS]->(:MarketedDevice|:ProductCode)  // Q10 — market coverage
+// (:Certificate)-[:COVERS]->(:TechnicalFile|:MarketedDevice)    // Q5 — what the certificate is for
 // (:PMSObligation|:Certificate)-[:DUE_ON]->(:Deadline)
 // (:AIModel)-[:EMBEDDED_IN]->(:MarketedDevice)
 // (:AIModel)-[:TRAINED_ON]->(:TrainingDataset)
@@ -131,3 +185,12 @@ CREATE CONSTRAINT vulnerability_id   IF NOT EXISTS FOR (vu:Vulnerability)  REQUI
 // A natural-language question is embedded, the nearest clauses retrieved, then
 // each hit grounded via GOVERNED_BY / SATISFIES so the answer is citable rather
 // than generated. Same pattern as bank-model-risk-kg/etl/graphrag.py.
+//
+// NOT a Cypher statement. Verified against Samyama-Graph 1.1.0: there is no
+// `CREATE VECTOR INDEX` in the parser — the vector index is created over REST:
+//
+//   POST /api/vector/indexes
+//   {"label":"Clause","property_key":"embedding","dimensions":384,"metric":"cosine"}
+//
+// The eCFR loader creates it after Clause is populated; creating it earlier
+// indexes nothing.
