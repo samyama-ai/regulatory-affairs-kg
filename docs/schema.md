@@ -32,9 +32,20 @@ belong.
 | Q11 | For an AI-enabled device — **what was it trained on, what did we assume, when was it last validated, what findings are open?** | AI governance |
 | Q12 | **Which AI-enabled devices may be retrained without a new submission** (predetermined change control)? | AI governance |
 | Q13 | **What is in this device's software bill of materials, and does any component carry a reportable vulnerability?** | Cybersecurity |
+| Q14 | This device's evidence rests on patient data — **under which privacy regime, for what purpose, on what lawful basis, and was an impact assessment done?** | Privacy |
+| Q15 | **Which of our data flows leave the jurisdiction they were collected in, and under what safeguard?** | Privacy |
+| Q16 | For an AI-enabled device — **was the training data representative of the intended-use population, and what is the evidence?** | Data quality |
+| Q17 | **How much of this predicate chain is actually resolved, how was each link established, and how far should I trust it?** | Data quality |
 
 **Built first:** Q1 (the value), Q6 (the demonstration), Q11 (the direction).
 The rest are modelled so they are reachable without redesign.
+
+Q14–Q17 were added after the first pass. Q1–Q13 walk a device through its regulatory life;
+these four cut across it — every stage rests on patient data, and every claim rests on evidence of
+some quality. **Q17 is the only question here about the graph itself rather than about a device**,
+and it exists because predicate chains are partial by construction (see
+[`sources/openfda-devices.md`](sources/openfda-devices.md)). A limitation stated in prose is a
+caveat; the same limitation carried as a property is an answer.
 
 ---
 
@@ -133,7 +144,65 @@ text, which is a separate source.
 is ingested), linked by `HAS_CLAUSE`. `Clause.text` carries the prose and `Clause.embedding` the
 384-dim vector for retrieval.
 
-### 2.7 The AI-governance layer is modelled before it is populated
+### 2.7 Privacy attaches to the data, not to the device
+
+The instinct is `Device -[:SUBJECT_TO]-> PrivacyRegime`. It is wrong, and wrong in a way that
+would quietly produce false answers.
+
+A device is not subject to HIPAA. **A dataset is.** The same scanner generates a de-identified
+research extract in one hospital and identifiable records in another; the device is identical and
+the obligations are not. Attaching the regime to the device asserts an obligation that may not
+exist, and misses one that does.
+
+| Option | Consequence |
+|---|---|
+| `Device -[:SUBJECT_TO]-> PrivacyRegime` | Wrong granularity — obligation follows the data, not the hardware |
+| A `privacy` property on each dataset | Cannot express *which* regime, purpose or basis, and cannot be traversed |
+| **`DataCategory` between the data and the regime** | The regime is reached through what the data actually is; one dataset can carry several categories |
+
+**Decision:** the third.
+
+```
+TrainingDataset|TechnicalFile|AdverseEvent -[:CONTAINS_DATA]-> DataCategory -[:REGULATED_BY]-> PrivacyRegime
+```
+
+`DataCategory` (`PHI`, `PII`, special-category, pseudonymised, anonymised) is the hinge. It is
+also what makes Q15 answerable: a transfer moves *categories* across a border, and it is the
+category that decides whether a safeguard is required.
+
+**Revisit when** a device is found whose regime genuinely does not depend on the data it processes.
+
+### 2.8 "Data quality" is two questions wearing one name
+
+The phrase covers two things in this domain, and merging them produces a layer that answers
+neither.
+
+1. **Device-facing** — was the *training data* for an AI-enabled device representative of the
+   intended-use population? A regulator's question about the device.
+2. **Graph-facing** — is *our own extracted data* right? A predicate name resolved by fuzzy
+   matching is a claim with a confidence, not a fact.
+
+| Option | Consequence |
+|---|---|
+| One `DataQuality` layer for both | Conflates a regulatory finding about a device with our own extraction confidence — the two have different audiences and different consequences |
+| Only the device-facing sense | Leaves the graph's own partiality in prose, where it cannot be queried or measured |
+| **Both, modelled differently** | Device-facing gets nodes and reuses `Finding`; graph-facing rides as properties |
+
+**Decision:** the third, and the asymmetry is deliberate.
+
+- **Device-facing** becomes `DataQualityCheck` nodes with a `dimension` property
+  (representativeness, completeness, accuracy, timeliness, consistency), raising the **same
+  `Finding` node the AI-governance layer already uses**. A bias evaluation is a data-quality check
+  with `dimension = 'representativeness'` — not a separate label.
+- **Graph-facing** becomes **properties on Tier-1 nodes** — `source`, `retrieved_at`,
+  `extraction_method`, and on `PredicateClaim` a `resolution_confidence` and
+  `resolution_method`. A provenance *node* per record would roughly double the node count to
+  carry four fields that are never traversed, only filtered.
+
+That asymmetry is the decision. Provenance is filtered; quality findings are traversed. Shape
+follows use.
+
+### 2.9 The AI-governance layer is modelled before it is populated
 
 openFDA exposes no AI/ML fields. The FDA publishes an AI/ML-Enabled Medical Device List
 separately; it has not yet been evaluated as a source.
@@ -189,6 +258,22 @@ model governance is domain-independent, and reusing a validated structure is the
 | `PMSObligation`, `Deadline` | Q5, Q9 | EU MDR; FDA post-market commitments |
 | `AIModel`, `TrainingDataset`, `Assumption`, `Validation`, `Finding`, `Control` | Q11, Q12 | FDA AI/ML-Enabled Device List (unevaluated) |
 | `SoftwareComponent`, `Vulnerability` | Q13 | SBOM submissions; CVE/NVD |
+| `PrivacyRegime` | Q14, Q15 | HIPAA, GDPR, EU MDR Art. 110 — statute text, hand-curated |
+| `DataCategory` | Q14, Q15 | derived; a controlled vocabulary, not a feed |
+| `ProcessingPurpose`, `LawfulBasis` | Q14 | customer-internal — records of processing |
+| `DPIA` | Q14 | customer-internal |
+| `DataTransfer` | Q15 | customer-internal |
+| `DataQualityCheck` | Q16 | AI submission evidence; customer-internal for their own devices |
+
+### Provenance — carried as properties, not nodes
+
+Every Tier-1 node carries `source` (the endpoint or document it came from), `retrieved_at` and
+`extraction_method` (`api` \| `pdf-text` \| `pdf-ocr` \| `derived`). `PredicateClaim` additionally
+carries `resolution_confidence` (0–1) and `resolution_method`.
+
+This is what makes **Q17** answerable: *"how much of this chain is resolved, and how far should I
+trust it?"* becomes a filter on a path rather than a caveat in a document. See §2.8 for why
+provenance is properties while quality findings are nodes.
 
 `Deadline` is a node rather than a date property so that *"what is due in the next 90 days across
 every obligation type"* is one traversal rather than a scan of every obligation label. The date is
@@ -235,6 +320,16 @@ that populates them is ingested.
 | `SATISFIES` | Control → Regulation \| Clause | Control-to-requirement mapping |
 | `CONTAINS_COMPONENT` | MarketedDevice → SoftwareComponent | SBOM entry |
 | `HAS_VULNERABILITY` | SoftwareComponent → Vulnerability | Known CVE |
+| `CONTAINS_DATA` | TrainingDataset \| TechnicalFile \| AdverseEvent → DataCategory | What kind of personal data this evidence rests on |
+| `REGULATED_BY` | DataCategory → PrivacyRegime | The regime that governs that category |
+| `ENFORCED_IN` | PrivacyRegime → Jurisdiction | Where the regime has force |
+| `PROCESSED_FOR` | TrainingDataset \| TechnicalFile → ProcessingPurpose | Stated purpose of processing |
+| `JUSTIFIED_BY` | ProcessingPurpose → LawfulBasis | Consent, legitimate interest, public-health task |
+| `ASSESSES` | DPIA → ProcessingPurpose | The impact assessment covering a purpose |
+| `MOVES` | DataTransfer → DataCategory | What crosses a border |
+| `ORIGINATES_IN` \| `LANDS_IN` | DataTransfer → Jurisdiction | Both ends of the transfer |
+| `ASSESSED_BY` | TrainingDataset \| Submission \| MarketedDevice → DataQualityCheck | A quality check performed on the evidence |
+| `RAISED` | DataQualityCheck → Finding | Reuses the AI-governance `Finding` — see §2.8 |
 
 ---
 
@@ -312,6 +407,55 @@ trained on, what did you assume, when did you last validate it, what is still op
 what a bank supervisor asks about a credit model. Reusing the structure is the design, not a
 shortcut.
 
+### Privacy — Q14, Q15
+
+```
+TrainingDataset –CONTAINS_DATA→ DataCategory –REGULATED_BY→ PrivacyRegime –ENFORCED_IN→ Jurisdiction
+TrainingDataset –PROCESSED_FOR→ ProcessingPurpose –JUSTIFIED_BY→ LawfulBasis
+                                        ↑
+                                    ASSESSES
+                                        │
+                                      DPIA
+
+DataTransfer –MOVES→ DataCategory ;  DataTransfer –ORIGINATES_IN|LANDS_IN→ Jurisdiction
+```
+
+The obligation is reached **through the data**, never from the device (§2.7). A privacy officer
+asking *"which of our evidence bases carry identifiable patient data, under which regime, and is
+there a DPIA?"* gets one traversal instead of a document review.
+
+Q15 is the same shape rotated: a transfer moves categories, and both endpoints are `Jurisdiction`
+nodes the market-access questions already use. **Privacy and market access share the jurisdiction
+spine** — which is the reason this layer costs so little to add.
+
+### Data quality — Q16, Q17
+
+```
+TrainingDataset –ASSESSED_BY→ DataQualityCheck {dimension} –RAISED→ Finding
+```
+
+`Finding` is the same node the AI-governance layer raises from `Validation`. So *"what is open on
+this model?"* returns validation findings and data-quality findings together, which is how a
+regulator would ask it. A bias evaluation is `dimension = 'representativeness'`, not its own label.
+
+Q17 is the variable-length walk with the confidence read off each claim:
+
+```cypher
+MATCH (s:Submission)-[:CITES_PREDICATE|RESOLVES_TO*1..20]->(p:PredicateClaim)
+WHERE s.id = 'K233820'
+RETURN p.raw_name, p.resolution_confidence, p.resolution_method
+```
+
+**Verified against Samyama-Graph 1.1.0 on a three-link test chain** — returns each claim with its
+confidence, including the deliberately unresolved one at `0.0`.
+
+> Do **not** write this with a named path and `nodes(path)`. That form parses and returns the
+> right path lengths, but **every property comes back `null`** — see §8.
+
+This is the point of §2.8. The predicate chains were always going to be partial; carrying the
+confidence on the claim turns that from a disclosure into a queryable property. **A chain that
+dead-ends is visible, and now so is a chain that is merely weakly resolved.**
+
 ### Cybersecurity — Q13
 
 ```
@@ -336,6 +480,20 @@ common component reaches every device containing it in two hops.
   does not need redesigning when a source is found.
 - **`TechnicalFile` is customer data**, not public. It is modelled because Q2 and Q4 need it in a
   deployed system, and it marks where a customer's own data would attach.
+- **The privacy layer is not legal advice and is not populated.** `PrivacyRegime` carries
+  identifiers and scope, not statute text. Whether a given dataset falls under a regime is a legal
+  determination made by the customer and recorded here — the graph stores the determination, it
+  does not make it. `ProcessingPurpose`, `LawfulBasis`, `DPIA` and `DataTransfer` are all
+  customer-internal records with no public source.
+- **`DataCategory` is a controlled vocabulary we define**, not a published standard. It is the one
+  place in the schema where the terms are ours rather than a regulator's, and it should be
+  reviewed by someone who does this work for a living.
+- **Provenance properties are only as good as the loader that writes them.** They are declared
+  here; nothing yet populates them, and an unpopulated `resolution_confidence` must not be read as
+  high confidence. The loader must write them or leave them null — never default them.
+- **`DataQualityCheck` describes checks that were performed, not checks that should have been.**
+  The absence of a check is not evidence of a failure, and the graph cannot distinguish "not
+  assessed" from "not disclosed".
 
 ---
 
@@ -353,7 +511,20 @@ common component reaches every device containing it in two hops.
    whether `Jurisdiction` is the EU, the member state, or both.
 6. **`ProductCode` granularity** — is a product code sometimes too coarse to be a useful join for
    post-market clustering?
-7. **`Deadline.due_date` index behaviour is declared, not benchmarked.** The index is created and
+7. **`DataCategory` vocabulary needs a practitioner's review.** PHI / PII / special-category /
+   pseudonymised / anonymised is a reasonable first cut, but it is ours, not a regulator's. It is
+   the highest-risk guess in the schema.
+8. **Is a `DPIA` per purpose or per system?** GDPR Article 35 assesses *processing*, which in
+   practice is usually a system rather than a single purpose. Modelled per purpose for now;
+   revisit with a real record.
+9. **How is `resolution_confidence` produced?** A fuzzy-match score is not a probability. Whatever
+   the loader writes must be defined and reproducible, or the number is worse than nothing — it
+   would look like measurement while being a guess. Blocks Q17 from being trustworthy.
+10. **Does a de-identified dataset leave the privacy layer entirely?** If anonymised data is out of
+   scope of GDPR, it arguably should not carry a `DataCategory` at all — but then the graph cannot
+   show that anonymisation was the control that removed the obligation. Leaning toward keeping the
+   category and marking it, but unresolved.
+11. **`Deadline.due_date` index behaviour is declared, not benchmarked.** The index is created and
    the statement executes; whether the engine plans a range scan over it has not been measured.
    Settle it with the benchmark suite, not by assertion.
 
@@ -362,7 +533,7 @@ common component reaches every device containing it in two hops.
 ## 8. Verified against the engine
 
 `schema/regulatory_affairs_kg.cypher` was executed statement by statement against a clean
-**Samyama-Graph 1.1.0** instance. All 28 statements run clean; `tests/test_schema_cypher.py` keeps
+**Samyama-Graph 1.1.0** instance. All 36 statements run clean; `tests/test_schema_cypher.py` keeps
 it that way and skips when no engine is reachable.
 
 Reading the file twice did not catch what running it once did. Three things changed as a result:
@@ -387,7 +558,34 @@ prevents a double insert. This is the finding with the most consequence for the 
 `POST /api/vector/indexes` with `{"label":…,"property_key":…,"dimensions":384,"metric":"cosine"}` —
 so it belongs in the eCFR loader, not in this file.
 
-One engine bug found in passing, unrelated to the schema but relevant to the benchmark suite: an
-inline property pattern combined with an aggregate ignores the filter. `MATCH (x:L {id:'B'})
-RETURN count(x)` returns the count for the whole label, while `MATCH (x:L) WHERE x.id = 'B'`
-returns the correct count. **Use `WHERE`, not inline property maps, in anything that aggregates.**
+### Engine bugs found in passing
+
+Unrelated to the schema, but they constrain how the benchmark suite and the loaders must be
+written, so they are recorded here rather than in a side note.
+
+**1. An inline property pattern combined with an aggregate ignores the filter.**
+
+```cypher
+MATCH (x:L {id:'B'}) RETURN count(x)        -- returns the count for the WHOLE label
+MATCH (x:L) WHERE x.id = 'B' RETURN count(x) -- correct
+```
+
+This is a regression against the engine's own ADR-029, which states both forms lower to the same
+plan ("fixed in v0.6.1"). **Use `WHERE`, never inline property maps, in anything that aggregates.**
+
+**2. `nodes(path)` returns nodes with unresolved properties.**
+
+```cypher
+MATCH path = (s:Submission)-[:CITES_PREDICATE|RESOLVES_TO*]->(e)
+WHERE s.id = 'K233820'
+RETURN [n IN nodes(path) | n.id]            -- [null, null, null] — path length right, values gone
+```
+
+The path is traversed correctly and the lengths are right; only the properties are lost. Likely an
+interaction with late materialization (ADR-012) — the path carries node references and `nodes()`
+never resolves them.
+
+**Consequence for us:** Q17 must be written as a variable-length match with the claim bound to its
+own variable (§5), not as a named path. That form is verified working. Any benchmark query that
+reaches into a path to read properties will silently return nulls rather than fail — which is the
+dangerous kind of bug, because it looks like missing data rather than a broken query.
