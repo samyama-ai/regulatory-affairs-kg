@@ -52,7 +52,7 @@ follow only once a loader exists.
 | **510(k) Summary PDFs** | FDA | Predicate device, standards conformed to | ≤ 175,686 (not all filed) | PDF | `accessdata.fda.gov/cdrh_docs/` | Public domain (US Gov) |
 | **openFDA subtotal** | | | **31,120,490** | | | |
 
-**82% of that total is MAUDE adverse-event reports.** The regulation-relevant core — clearances,
+**81.5% of that total is MAUDE adverse-event reports.** The regulation-relevant core — clearances,
 approvals, classification, registrations, UDI, recalls and enforcement — is **~5,752,329 records**.
 Quote that figure rather than the headline when the question is about graph scale.
 
@@ -115,8 +115,8 @@ truncating a chain.
 | Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
 | Schema design | ✅ [`docs/schema.md`](docs/schema.md) |
 | Schema verified against a live engine | ✅ every statement executes; [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) |
-| Downloaders | ❌ not written |
-| Loaders | ❌ not written |
+| Downloaders | ❌ [`etl/download_data.py`](etl/download_data.py) is a stub — nothing implemented |
+| Loaders | ❌ [`etl/loader.py`](etl/loader.py) is a stub — nothing implemented |
 | Snapshot | ❌ none |
 
 Reproduce the measurements:
@@ -152,7 +152,7 @@ added when they are.
 
 | # | Issue | Consequence here |
 |---|---|---|
-| 1 | `CREATE CONSTRAINT … FOR … REQUIRE` does not parse, though the engine's own `CYPHER_COMPATIBILITY.md` documents it as supported | The schema uses the `ON (n:L) ASSERT` form; do not "modernise" it back |
+| 1 | `CREATE CONSTRAINT … FOR … REQUIRE` does not parse, though the engine's own `CYPHER_COMPATIBILITY.md` documents it as supported | The schema uses the `ON (n:L) ASSERT` form; do not "modernise" it back. **Pinned by `test_uses_the_syntax_the_engine_parses`** — that test starts failing when the engine gains support |
 | 2 | A uniqueness constraint does **not** reject a duplicate `CREATE` | **Every loader must `MERGE` on the key.** A constraint here declares the key, it does not guard the insert |
 | 3 | An inline property pattern combined with an aggregate ignores the filter — `MATCH (x:L {id:'B'}) RETURN count(x)` returns the whole-label count. A regression against the engine's ADR-029 | Use `WHERE`, never inline property maps, in anything that aggregates |
 | 4 | `nodes(path)` returns nodes with unresolved properties — path lengths are correct, every property is `null` | Predicate-chain queries must bind the claim to its own variable rather than reach into a named path. **Fails silently**, reading as missing data rather than a broken query |
