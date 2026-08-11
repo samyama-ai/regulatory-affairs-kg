@@ -1,30 +1,43 @@
 # Dataset Card — Medical-Device Regulatory Affairs KG
 
-> **Status: skeleton.** Structure follows
-> `samyama-graph-competitor-benchmarks/benchmarks/large-scale/DATASET-CARD.md`.
-> Counts and licences filled in once source research completes (7 Aug 2026).
+> **Status: sources measured, schema designed, not yet loaded.** Every openFDA figure below is a
+> live measurement. Node and edge counts are deliberately absent — they do not exist until a
+> loader runs, and this repo does not publish numbers it has not measured.
 
-> _TODO — one paragraph: a knowledge graph of medical-device regulation combining N public
-> sources — submissions, clearances, classification, post-market surveillance, obligation text
-> and international market registrations — into one queryable graph._
+A knowledge graph of **medical-device regulatory affairs**, combining public sources — clearances
+and approvals, device classification and the regulation governing it, manufacturers and their
+registered facilities, post-market surveillance, and the predicate lineage published in 510(k)
+Summary PDFs — into one queryable graph.
+
+The problem it addresses: when a rule or a consensus standard changes, a manufacturer must work
+out which devices, technical files, certificates, registrations and post-market obligations are
+affected, and by when. Today that is manual work across spreadsheets and email. As a graph it is
+one traversal.
+
+The structure that makes it graph-native is the **510(k) predicate chain** — every US clearance
+names the older device it claims substantial equivalence to, forming a public citation chain back
+to 1976. Chains of unknown depth are what graph databases do well and relational databases do
+badly.
 
 | | |
 |---|---|
-| **Nodes** | _TBD — produced by the loader_ |
-| **Edges** | _TBD — produced by the loader_ |
-| **Source datasets** | 8 openFDA endpoints probed; 10 further sources identified |
-| **Engine** | Samyama-Graph OSS |
+| **Nodes** | _not yet measured — produced by the loader_ |
+| **Edges** | _not yet measured — produced by the loader_ |
+| **Source records available** | **31,120,490** across 8 openFDA endpoints (**~5.75M** excluding MAUDE adverse events) |
+| **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
+| **Schema** | Two tiers — see [`docs/schema.md`](docs/schema.md) for labels, edges and the design decisions behind them |
+| **Engine** | Samyama-Graph OSS 1.1.0 |
 | **Snapshot format** | `.sgsnap` |
-| **Build hardware** | _TBD_ |
+| **Build hardware** | _n/a — nothing built yet_ |
 | **License** | per-source (see table); raw rows not committed |
-| **Date** | _TBD_ |
+| **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11 |
 
-## Composition (per-source contribution)
+## Composition — Tier 1, measured
 
 **Source records, not graph nodes.** These are counts of records at the source, read live from
-the API by [`etl/probe_openfda.py`](etl/probe_openfda.py) on 2026-08-06. One record may become
-several nodes and edges; node/edge figures follow once a loader exists. Rows still marked `_TBD_`
-have not been researched yet.
+the API by [`etl/probe_openfda.py`](etl/probe_openfda.py) on **2026-08-06**. Not one figure is
+hand-entered. One source record may become several nodes and edges, so node and edge figures
+follow only once a loader exists.
 
 | Source | Publisher | Doc types | Source records | Format | Access | License |
 |---|---|---|---:|---|---|---|
@@ -37,43 +50,133 @@ have not been researched yet.
 | openFDA — enforcement | FDA | Enforcement reports | **39,635** | JSON API | `api.fda.gov/device/enforcement` | Public domain (US Gov) |
 | openFDA — classification | FDA | Product codes, class, regulation number | **7,085** | JSON API | `api.fda.gov/device/classification` | Public domain (US Gov) |
 | **510(k) Summary PDFs** | FDA | Predicate device, standards conformed to | ≤ 175,686 (not all filed) | PDF | `accessdata.fda.gov/cdrh_docs/` | Public domain (US Gov) |
-| 21 CFR 800–898 | eCFR / GPO | Obligation text | _TBD_ | XML | eCFR API | Public domain (US Gov) |
-| FDA guidance documents | FDA | Guidance | _TBD_ | _TBD_ | _TBD_ | Public domain (US Gov) |
-| FDA warning letters | FDA | Enforcement | _TBD_ | _TBD_ | _TBD_ | Public domain (US Gov) |
-| EU MDR 2017/745 | EUR-Lex | Regulation, Annex I GSPR | _TBD_ | XML/HTML | EUR-Lex | _TBD — check reuse terms_ |
-| EU IVDR 2017/746 | EUR-Lex | Regulation | _TBD_ | XML/HTML | EUR-Lex | _TBD_ |
-| EUDAMED | European Commission | Registrations, certificates | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| NANDO | European Commission | Notified bodies | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| Consensus standards | ISO / IEC / FDA-recognised list | Standard identifiers **only** | _TBD_ | _TBD_ | FDA recognised-standards DB | ⚠️ **Texts are paywalled — identifiers and clause references only, no text ingested** |
-| Secondary markets | ANVISA, CDSCO, Health Canada, TGA, MHRA | Registrations | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 | **openFDA subtotal** | | | **31,120,490** | | | |
+
+**81.5% of that total is MAUDE adverse-event reports.** The regulation-relevant core — clearances,
+approvals, classification, registrations, UDI, recalls and enforcement — is **~5,752,329 records**.
+Quote that figure rather than the headline when the question is about graph scale.
+
+## Composition — Tier 2, identified but not yet researched
+
+Named in scope and modelled in the schema; **no counts, because none has been measured**. Each
+needs the same live-probe treatment the openFDA endpoints received before it earns a number here.
+
+| Source | Publisher | What it would contribute | Format | Licence position |
+|---|---|---|---|---|
+| 21 CFR 800–898 | eCFR / GPO | Paragraph-level obligation text — the prose GraphRAG retrieves | XML | Public domain (US Gov) |
+| FDA guidance documents | FDA | Guidance applicability by product line | — | Public domain (US Gov) |
+| FDA warning letters | FDA | Enforcement history | — | Public domain (US Gov) |
+| EU MDR 2017/745 | EUR-Lex | Regulation, Annex I GSPR | XML/HTML | Reuse terms to confirm |
+| EU IVDR 2017/746 | EUR-Lex | In-vitro diagnostics regulation | XML/HTML | Reuse terms to confirm |
+| EUDAMED | European Commission | EU registrations and certificates | — | To confirm |
+| NANDO | European Commission | Notified bodies | — | To confirm |
+| Consensus standards | ISO / IEC / FDA-recognised list | Standard **identifiers only** | — | ⚠️ **Texts are paywalled — identifiers and clause references only, no text is ingested** |
+| Secondary markets | ANVISA, CDSCO, Health Canada, TGA, MHRA | Registrations outside the US and EU | — | Varies; several are not machine-readable |
 
 ## Schema (node labels + key edge types)
 
-_TODO — see [`docs/regulatory-affairs-kg-plan.md`](docs/regulatory-affairs-kg-plan.md)._
+Full definitions, the questions each shape serves, and the design decisions behind them are in
+[`docs/schema.md`](docs/schema.md); the executable form is
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher). Counts are not
+repeated here so the two cannot drift.
+
+The schema is derived from **the questions the graph must answer**, written in regulatory-affairs
+language. Every node and edge exists because it turns one of them into a single traversal;
+anything serving none of them was left out. It is split into two tiers:
+
+- **Tier 1 — loadable from public data today.** `Submission` (510(k), PMA, De Novo), `ProductCode`
+  (the join hub), `Regulation` (a 21 CFR section), `Manufacturer`, `Establishment`,
+  `MarketedDevice` (UDI), `Recall`, `AdverseEvent`, plus `PredicateClaim` and `Standard` from the
+  510(k) Summary PDFs.
+- **Tier 2 — modelled, deliberately unpopulated.** Regulation text and guidance, EU market
+  structures, obligations and deadlines, AI governance, cybersecurity/SBOM, and the privacy and
+  data-quality layers. These are designed so the ontology does not need redesigning when a source
+  is found, and are marked unpopulated rather than implied to hold data.
+
+Two shapes carry most of the value:
+
+```
+Regulation ←GOVERNED_BY– ProductCode ←CLASSIFIED_AS– Submission –SUBMITTED_BY→ Manufacturer
+Submission –CITES_PREDICATE→ PredicateClaim –RESOLVES_TO→ Submission → (repeat)
+```
+
+The first is the change blast-radius, and it is exact rather than approximate because
+`regulation_number` is a government-issued identifier present on every clearance, approval and
+classification record. The second is predicate lineage, and it is deliberately routed through a
+`PredicateClaim` node so that an **unresolved** predicate stays visible instead of silently
+truncating a chain.
 
 ## Provenance / how it was built
 
-_TODO — per-source download and load steps, snapshot names, reproduction command._
+**Nothing is built yet.** What exists today:
+
+| Step | Status |
+|---|---|
+| Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
+| Schema design | ✅ [`docs/schema.md`](docs/schema.md) |
+| Schema verified against a live engine | ✅ every statement executes; [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) |
+| Downloaders | ❌ [`etl/download_data.py`](etl/download_data.py) is a stub — nothing implemented |
+| Loaders | ❌ [`etl/loader.py`](etl/loader.py) is a stub — nothing implemented |
+| Snapshot | ❌ none |
+
+Reproduce the measurements:
+
+```bash
+python -m etl.probe_openfda            # record counts, read live from api.fda.gov
+python -m etl.probe_openfda --fields   # counts plus a field inventory per endpoint
+```
+
+Verify the schema against an engine:
+
+```bash
+docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+pytest tests/test_schema_cypher.py
+```
 
 Per the KG-repo convention, **raw downloaded rows are not committed**. This repo ships the
 downloaders, loaders, schema and a bounded demo only.
 
 ## Query benchmark
 
-_TODO — query suite and honest timings (selective reads, multi-hop, and anything that times out)._
+**None yet** — a benchmark without a loaded graph would be a fabrication. The query suite is
+scoped in [`benchmarks/`](benchmarks/) and lands with the first load, with honest timings
+including anything that times out.
+
+Two engine behaviours already constrain how those queries must be written; see Known issues.
 
 ## Known issues
 
-_TODO — engine issues filed against `samyama-graph`, cited by number._
+Found while executing the schema against **Samyama-Graph 1.1.0**. All four are engine issues, not
+schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
+added when they are.
+
+| # | Issue | Consequence here |
+|---|---|---|
+| 1 | `CREATE CONSTRAINT … FOR … REQUIRE` does not parse, though the engine's own `CYPHER_COMPATIBILITY.md` documents it as supported | The schema uses the `ON (n:L) ASSERT` form; do not "modernise" it back. **Pinned by `test_uses_the_syntax_the_engine_parses`** — that test starts failing when the engine gains support |
+| 2 | A uniqueness constraint does **not** reject a duplicate `CREATE` | **Every loader must `MERGE` on the key.** A constraint here declares the key, it does not guard the insert |
+| 3 | An inline property pattern combined with an aggregate ignores the filter — `MATCH (x:L {id:'B'}) RETURN count(x)` returns the whole-label count. A regression against the engine's ADR-029 | Use `WHERE`, never inline property maps, in anything that aggregates |
+| 4 | `nodes(path)` returns nodes with unresolved properties — path lengths are correct, every property is `null` | Predicate-chain queries must bind the claim to its own variable rather than reach into a named path. **Fails silently**, reading as missing data rather than a broken query |
 
 ## Usage
 
-_TODO — tenant creation, snapshot import, bounded first run._
+Nothing to load yet. Once a snapshot exists:
+
+```bash
+# start the engine
+docker run --rm -p 8080:8080 -p 6379:6379 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+
+# create the tenant
+curl -X POST http://localhost:8080/api/tenants \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"regulatory","name":"Regulatory Affairs KG"}'
+
+# apply the schema
+# (then import the .sgsnap snapshot — command lands with the first build)
+```
 
 ## ⚠️ Limitations
 
-_TODO — expand. Initial list:_
+Recorded before anyone finds them, per the house standard.
 
 - **The predicate device is not exposed by the openFDA API.** It is published only in the 510(k)
   Summary PDF, and given as a free-text device name rather than a K-number — sometimes naming a
