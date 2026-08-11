@@ -150,6 +150,38 @@ CREATE CONSTRAINT ON (co:Control) ASSERT co.id IS UNIQUE;
 CREATE CONSTRAINT ON (sc:SoftwareComponent) ASSERT sc.id IS UNIQUE;
 CREATE CONSTRAINT ON (vu:Vulnerability) ASSERT vu.id IS UNIQUE;
 
+// Privacy (Q14, Q15) — the obligation attaches to the DATA, never to the device.
+// A device is not subject to HIPAA; a dataset is. The same scanner yields a
+// de-identified extract in one hospital and identifiable records in another.
+// DataCategory is the hinge: evidence -> category -> regime (docs/schema.md §2.7).
+CREATE CONSTRAINT ON (pr:PrivacyRegime) ASSERT pr.id IS UNIQUE;
+CREATE CONSTRAINT ON (dc:DataCategory) ASSERT dc.id IS UNIQUE;
+CREATE CONSTRAINT ON (pp:ProcessingPurpose) ASSERT pp.id IS UNIQUE;
+CREATE CONSTRAINT ON (lb:LawfulBasis) ASSERT lb.id IS UNIQUE;
+CREATE CONSTRAINT ON (dp:DPIA) ASSERT dp.id IS UNIQUE;
+CREATE CONSTRAINT ON (dt:DataTransfer) ASSERT dt.id IS UNIQUE;
+
+// Data quality, device-facing (Q16) — was the training data representative of
+// the intended-use population? `dimension` carries representativeness |
+// completeness | accuracy | timeliness | consistency, so a bias evaluation is a
+// check with dimension='representativeness', not a label of its own. Raises the
+// SAME Finding node the AI-governance layer raises, so "what is open on this
+// model" returns validation and data-quality findings together.
+CREATE CONSTRAINT ON (dq:DataQualityCheck) ASSERT dq.id IS UNIQUE;
+
+// Data quality, graph-facing (Q17) — NO node. Provenance rides as properties on
+// Tier-1 nodes: source, retrieved_at, extraction_method
+// (api | pdf-text | pdf-ocr | derived); PredicateClaim additionally carries
+// resolution_confidence and resolution_method.
+//
+// Provenance is FILTERED, findings are TRAVERSED — shape follows use. A
+// provenance node per record would roughly double the node count to carry four
+// fields nobody walks through (docs/schema.md §2.8).
+//
+// The loader must write these or leave them NULL. A defaulted confidence would
+// look like a measurement while being a guess.
+CREATE INDEX ON :PredicateClaim(resolution_confidence);
+
 // Tier-2 edges
 //
 // Endpoints here are PROVISIONAL — they are the shape the question requires,
@@ -168,6 +200,25 @@ CREATE CONSTRAINT ON (vu:Vulnerability) ASSERT vu.id IS UNIQUE;
 // (:Guidance)-[:APPLIES_TO]->(:ProductCode|:Regulation)  // Q3
 // (:Registration)-[:REGISTERS]->(:MarketedDevice|:ProductCode)  // Q10 — market coverage
 // (:Certificate)-[:COVERS]->(:TechnicalFile|:MarketedDevice)    // Q5 — what the certificate is for
+
+// Privacy (Q14) — obligation reached through the data, not the device
+// (:TrainingDataset|:TechnicalFile|:AdverseEvent)-[:CONTAINS_DATA]->(:DataCategory)
+// (:DataCategory)-[:REGULATED_BY]->(:PrivacyRegime)
+// (:PrivacyRegime)-[:ENFORCED_IN]->(:Jurisdiction)
+// (:TrainingDataset|:TechnicalFile)-[:PROCESSED_FOR]->(:ProcessingPurpose)
+// (:ProcessingPurpose)-[:JUSTIFIED_BY]->(:LawfulBasis)
+// (:DPIA)-[:ASSESSES]->(:ProcessingPurpose)
+
+// Cross-border transfer (Q15) — same shape rotated. Both endpoints are the
+// Jurisdiction nodes the market-access questions already use: privacy and
+// market access share the jurisdiction spine, which is why this layer is cheap.
+// (:DataTransfer)-[:MOVES]->(:DataCategory)
+// (:DataTransfer)-[:ORIGINATES_IN]->(:Jurisdiction)
+// (:DataTransfer)-[:LANDS_IN]->(:Jurisdiction)
+
+// Data quality, device-facing (Q16)
+// (:TrainingDataset|:Submission|:MarketedDevice)-[:ASSESSED_BY]->(:DataQualityCheck)
+// (:DataQualityCheck)-[:RAISED]->(:Finding)     // same Finding as Validation raises
 // (:PMSObligation|:Certificate)-[:DUE_ON]->(:Deadline)
 // (:AIModel)-[:EMBEDDED_IN]->(:MarketedDevice)
 // (:AIModel)-[:TRAINED_ON]->(:TrainingDataset)
