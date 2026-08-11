@@ -65,8 +65,15 @@ Follows the "Why these shapes" section in `bank-model-risk-kg/docs/schema.md`._
 Planned justifications:
 
 - **Change blast-radius** — `Clause ←GOVERNED_BY– Device –REGISTERED_IN→ Jurisdiction`
-  and `Device –REQUIRES_PMS→ PMSObligation –DUE_ON→ Deadline`
-- **Predicate lineage** — `Submission –PREDICATE_OF→ PredicateDevice`, transitively
+  and `Device –REQUIRES_PMS→ PMSObligation –DUE_ON→ Deadline`.
+  ✅ Supported by the data: every 510(k), PMA and classification record carries
+  `regulation_number` (e.g. `870.5150`), a direct pointer into 21 CFR. Device→law is an exact
+  join, not an approximation.
+- **Predicate lineage** — `Submission –PREDICATE_OF→ PredicateDevice`, transitively.
+  ⚠️ Constrained by the data: predicates are **not** in the openFDA API. They appear only in the
+  510(k) Summary PDFs, as free-text device names rather than K-numbers, sometimes naming pre-1976
+  devices with no clearance record. The ontology must represent an **unresolved** predicate, and
+  the first build will be scoped to one product area rather than the full corpus.
 - **Conformity evidence** — `Device –CONFORMS_TO→ Standard` and
   `TechnicalFile –CERTIFIED_BY→ NotifiedBody`
 - **Post-market signal** — `Device –REPORTED_AS→ AdverseEvent`, `Recall`, `WarningLetter`
@@ -85,11 +92,11 @@ _TODO — the change blast-radius query in Cypher, with results._
 _TODO — see [`DATASET-CARD.md`](../DATASET-CARD.md) composition table for the authoritative list.
 Per-source detail in [`sources/`](sources/)._
 
-| Tier | Sources |
-|---|---|
-| 1 | openFDA device endpoints; 21 CFR Parts 800–898 (eCFR); FDA guidance, warning letters, inspections |
-| 2 | EU MDR 2017/745 + IVDR 2017/746 (EUR-Lex); Annex I GSPR; MDCG guidance; EUDAMED; NANDO; consensus standards |
-| 3 | ANVISA, CDSCO, Health Canada, TGA, MHRA/UKCA |
+| Tier | Sources | Status |
+|---|---|---|
+| 1 | openFDA device endpoints (8, **31,120,490 records — probed 2026-08-06**, see [`sources/openfda-devices.md`](sources/openfda-devices.md)); 510(k) Summary PDFs; 21 CFR Parts 800–898 (eCFR); FDA guidance, warning letters, inspections | openFDA researched; rest pending |
+| 2 | EU MDR 2017/745 + IVDR 2017/746 (EUR-Lex); Annex I GSPR; MDCG guidance; EUDAMED; NANDO; consensus standards | pending |
+| 3 | ANVISA, CDSCO, Health Canada, TGA, MHRA/UKCA | pending |
 
 ---
 
