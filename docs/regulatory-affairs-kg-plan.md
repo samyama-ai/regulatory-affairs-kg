@@ -28,12 +28,15 @@ Scope is fixed in [`scope.md`](scope.md).
 
 ## Node labels
 
-_TODO — table: label | key properties | projected count | source._
+**Defined in [`schema.md`](schema.md) §3.** Two tiers: populated from openFDA and the 510(k)
+Summary PDFs (`Submission`, `ProductCode`, `Regulation`, `Manufacturer`, `Establishment`,
+`MarketedDevice`, `Recall`, `AdverseEvent`, `PredicateClaim`, `Standard`), and modelled but not
+yet populated (`Clause`, `Guidance`, `Jurisdiction`, `Registration`, `NotifiedBody`,
+`Certificate`, `TechnicalFile`, `PMSObligation`, `Deadline`, the AI-governance layer, and the
+SBOM layer).
 
-> The scaffold ships a generic placeholder ontology (`Regulation`, `Authority`, `Submission`,
-> `Approval`, `Product`, `Requirement`) in `docs/schema.md` and
-> `schema/regulatory_affairs_kg.cypher`. Both are replaced once source research confirms what
-> the data supports.
+Projected counts follow the first loader run; source record counts are in
+[`../DATASET-CARD.md`](../DATASET-CARD.md).
 
 Working set:
 
@@ -47,22 +50,16 @@ Working set:
 
 ## Edge types
 
-_TODO — table: edge | from → to | properties | meaning._
-
-Working set:
-
-`PREDICATE_OF` · `GOVERNED_BY` · `HAS_CLAUSE` · `CONFORMS_TO` · `CERTIFIED_BY` ·
-`REGISTERED_IN` · `CLEARED_VIA` · `CLASSIFIED_AS` · `ISSUED_BY` · `APPLIES_IN` ·
-`TRIGGERED_RECALL` · `REPORTED_AS` · `REQUIRES_PMS` · `IMPACTED_BY` · `DUE_ON`
+**Defined in [`schema.md`](schema.md) §4** — 25 edge types. Note two changes from the working set
+drafted before source research: `PREDICATE_OF` is replaced by
+`CITES_PREDICATE` → `PredicateClaim` → `RESOLVES_TO`, so an unresolved predicate stays visible;
+and joins route through `ProductCode` rather than device names.
 
 ---
 
 ## Why these shapes
 
-_TODO — justify each cluster of edges by the question it turns into a single traversal.
-Follows the "Why these shapes" section in `bank-model-risk-kg/docs/schema.md`._
-
-Planned justifications:
+**Written in [`schema.md`](schema.md) §5.** Summary:
 
 - **Change blast-radius** — `Clause ←GOVERNED_BY– Device –REGISTERED_IN→ Jurisdiction`
   and `Device –REQUIRES_PMS→ PMSObligation –DUE_ON→ Deadline`.
