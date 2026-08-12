@@ -23,7 +23,7 @@ badly.
 |---|---|
 | **Nodes** | _not yet measured — produced by the loader_ |
 | **Edges** | _not yet measured — produced by the loader_ |
-| **Source records available** | **31,120,490** across 8 openFDA endpoints (**~5.75M** excluding MAUDE adverse events) |
+| **Source records available** | **31,120,490** across 8 openFDA endpoints; **668,381** are the authorisation and oversight record — see below |
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); rationale is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
@@ -52,9 +52,21 @@ follow only once a loader exists.
 | **510(k) Summary PDFs** | FDA | Predicate device, standards conformed to | ≤ 175,686 (not all filed) | PDF | `accessdata.fda.gov/cdrh_docs/` | Public domain (US Gov) |
 | **openFDA subtotal** | | | **31,120,490** | | | |
 
-**81.5% of that total is MAUDE adverse-event reports.** The regulation-relevant core — clearances,
-approvals, classification, registrations, UDI, recalls and enforcement — is **~5,752,329 records**.
-Quote that figure rather than the headline when the question is about graph scale.
+### Which number to quote
+
+**81.5% of the total is MAUDE adverse-event reports**, so 31 million overstates
+graph-relevant scale. But 5,752,329 — the obvious next figure — is **88.4% UDI**
+(5,083,948), and UDI does not reliably join to clearances. That is decision §2.2,
+not a data-quality complaint: the FDA publishes no link between a clearance and
+the device as sold, so we do not assert one.
+
+| Figure | What it covers |
+|---:|---|
+| **31,120,490** | Everything. 81.5% adverse-event reports. |
+| **5,752,329** | Excluding adverse events. **88.4% of this is UDI.** |
+| **668,381** | Clearances, approvals, classification, registrations, recalls and enforcement — **the authorisation and oversight record** |
+
+**Quote 668,381 when the question is about the regulatory backbone.**
 
 ## Composition — Tier 2, identified but not yet researched
 

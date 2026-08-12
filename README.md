@@ -70,8 +70,13 @@ MHRA/UKCA.
 **8 openFDA device endpoints, 31,120,490 records**, all US-government public domain — measured
 live, never hand-entered. Reproduce with `python -m etl.probe_openfda`.
 
-Quote the honest figure: **~5.75M is regulation-relevant.** 81.5% of the total is MAUDE
-adverse-event reports.
+**Which number to quote.** 81.5% of the total is MAUDE adverse-event reports, so 31 million
+overstates graph-relevant scale. And 5,752,329 — the obvious next figure — is **88.4% UDI**,
+which does not reliably join to clearances (the FDA publishes no such link, so we do not assert
+one).
+
+The authorisation and oversight record — clearances, approvals, classification, registrations,
+recalls and enforcement — is **668,381**. That is the figure for the regulatory backbone.
 
 Full table with per-source licences in [`DATASET-CARD.md`](DATASET-CARD.md).
 
