@@ -25,7 +25,7 @@ badly.
 | **Edges** | _not yet measured — produced by the loader_ |
 | **Source records available** | **31,120,490** across 8 openFDA endpoints (**~5.75M** excluding MAUDE adverse events) |
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
-| **Schema** | Two tiers — see [`docs/schema.md`](docs/schema.md) for labels, edges and the design decisions behind them |
+| **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); rationale is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
 | **Snapshot format** | `.sgsnap` |
 | **Build hardware** | _n/a — nothing built yet_ |
@@ -75,10 +75,14 @@ needs the same live-probe treatment the openFDA endpoints received before it ear
 
 ## Schema (node labels + key edge types)
 
-Full definitions, the questions each shape serves, and the design decisions behind them are in
-[`docs/schema.md`](docs/schema.md); the executable form is
-[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher). Counts are not
-repeated here so the two cannot drift.
+The executable form is
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), which carries the
+rationale for each shape as inline comments. Counts are not repeated here so the two cannot
+drift.
+
+The long-form ontology document — the 17 questions, the 8 design decisions with the alternatives
+considered, and "why these shapes" — is an internal design record and is not published with this
+repo.
 
 The schema is derived from **the questions the graph must answer**, written in regulatory-affairs
 language. Every node and edge exists because it turns one of them into a single traversal;
@@ -113,7 +117,7 @@ truncating a chain.
 | Step | Status |
 |---|---|
 | Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
-| Schema design | ✅ [`docs/schema.md`](docs/schema.md) |
+| Schema design | ✅ 17 questions, 34 labels, 39 edges, 8 recorded decisions |
 | Schema verified against a live engine | ✅ every statement executes; [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) |
 | Downloaders | ❌ [`etl/download_data.py`](etl/download_data.py) is a stub — nothing implemented |
 | Loaders | ❌ [`etl/loader.py`](etl/loader.py) is a stub — nothing implemented |
@@ -182,7 +186,7 @@ Recorded before anyone finds them, per the house standard.
   Summary PDF, and given as a free-text device name rather than a K-number — sometimes naming a
   pre-1976 device that has no clearance record at all. Predicate chains will therefore be
   **partial**, and unresolved predicates must be represented rather than silently dropped.
-  See [`docs/sources/openfda-devices.md`](docs/sources/openfda-devices.md).
+  Reproduce the endpoint measurements with `python -m etl.probe_openfda`.
 - **Not every clearance publishes a summary PDF** — submitters may file a statement instead.
   The proportion is not yet quantified.
 - **Older summary PDFs are likely scans** requiring OCR; the sampled 2024 filing had a text layer.

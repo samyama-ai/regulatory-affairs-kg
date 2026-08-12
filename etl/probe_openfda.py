@@ -1,6 +1,6 @@
 """Probe the openFDA device endpoints — record counts and field inventory.
 
-Every number in `docs/sources/openfda-devices.md` and in the openFDA rows of
+Every number in the openFDA source research (Solutions wiki: regulatory-affairs/wiki/sources/kg-openfda-devices-source-research.md) and in the openFDA rows of
 `DATASET-CARD.md` comes from this script. Re-run it to verify them; do not
 hand-edit counts into the docs.
 

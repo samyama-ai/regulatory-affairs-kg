@@ -1,7 +1,9 @@
 // Medical-Device Regulatory Affairs Knowledge Graph — schema
 //
-// Rationale for every shape below is in docs/schema.md ("Why these shapes").
-// Source reality — what the data actually supports — is in docs/sources/openfda-devices.md.
+// Rationale for every shape below is recorded inline. The long-form ontology
+// document — the 17 questions, the 8 design decisions with the alternatives
+// considered, and "why these shapes" — is an internal design record.
+// Source reality is measurable here: `python -m etl.probe_openfda`.
 //
 // Two tiers:
 //   TIER 1  populated from openFDA and the 510(k) Summary PDFs
@@ -52,7 +54,7 @@ CREATE CONSTRAINT ON (d:MarketedDevice) ASSERT d.udi_di IS UNIQUE;
 // properties. device/recall and device/enforcement are two views of the same
 // event sharing recall_number; modelling them as two nodes joined by an edge
 // would collide on this constraint at load time. Same argument as Submission
-// and its decision (docs/schema.md §2.3).
+// and its decision (the ontology doc, §2.3).
 CREATE CONSTRAINT ON (rc:Recall) ASSERT rc.recall_number IS UNIQUE;
 CREATE CONSTRAINT ON (ae:AdverseEvent) ASSERT ae.report_number IS UNIQUE;
 
@@ -153,7 +155,7 @@ CREATE CONSTRAINT ON (vu:Vulnerability) ASSERT vu.id IS UNIQUE;
 // Privacy (Q14, Q15) — the obligation attaches to the DATA, never to the device.
 // A device is not subject to HIPAA; a dataset is. The same scanner yields a
 // de-identified extract in one hospital and identifiable records in another.
-// DataCategory is the hinge: evidence -> category -> regime (docs/schema.md §2.7).
+// DataCategory is the hinge: evidence -> category -> regime (the ontology doc, §2.7).
 CREATE CONSTRAINT ON (pr:PrivacyRegime) ASSERT pr.id IS UNIQUE;
 CREATE CONSTRAINT ON (dc:DataCategory) ASSERT dc.id IS UNIQUE;
 CREATE CONSTRAINT ON (pp:ProcessingPurpose) ASSERT pp.id IS UNIQUE;
@@ -176,7 +178,7 @@ CREATE CONSTRAINT ON (dq:DataQualityCheck) ASSERT dq.id IS UNIQUE;
 //
 // Provenance is FILTERED, findings are TRAVERSED — shape follows use. A
 // provenance node per record would roughly double the node count to carry four
-// fields nobody walks through (docs/schema.md §2.8).
+// fields nobody walks through (the ontology doc, §2.8).
 //
 // The loader must write these or leave them NULL. A defaulted confidence would
 // look like a measurement while being a guess.
@@ -185,7 +187,7 @@ CREATE INDEX ON :PredicateClaim(resolution_confidence);
 // Tier-2 edges
 //
 // Endpoints here are PROVISIONAL — they are the shape the question requires,
-// and the source that will populate each is named in docs/schema.md §3. They
+// and the source that will populate each is named in the ontology doc, §3. They
 // are written down rather than left out so that no Tier-2 label is declared
 // without a path to the question it serves.
 // (:Regulation)-[:HAS_CLAUSE]->(:Clause)

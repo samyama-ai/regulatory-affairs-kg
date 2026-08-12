@@ -1,86 +1,107 @@
 # Medical-Device Regulatory Affairs Knowledge Graph
 
-**Device regulation as a graph — submissions, clearances, predicate chains, obligation text,
-conformity evidence, market registrations and post-market surveillance.**
+**Device regulation as a graph — clearances, predicate chains, the law that governs each device,
+manufacturers and facilities, recalls and adverse events.**
 
-> Part of the **Samyama** ecosystem — loaded into and queried via the graph engine at [samyama-ai/samyama-graph](https://github.com/samyama-ai/samyama-graph).
-> This repo holds the loader and source-data specifics for the KG.
+> Part of the **Samyama** ecosystem — loaded into and queried via the graph engine at
+> [samyama-ai/samyama-graph](https://github.com/samyama-ai/samyama-graph).
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
 
-> 🚧 **Spec in progress.** Scope is decided; source research and the ontology land next.
-> Start with [`docs/scope.md`](docs/scope.md), then
-> [`docs/regulatory-affairs-kg-plan.md`](docs/regulatory-affairs-kg-plan.md) and
-> [`DATASET-CARD.md`](DATASET-CARD.md).
+> 🚧 **Sources measured, schema designed and engine-verified, not yet loaded.**
+> Node and edge counts do not exist until a loader runs, and this repo does not
+> publish numbers it has not measured. See [`DATASET-CARD.md`](DATASET-CARD.md).
 
 ---
 
 When a regulation or a recognised standard changes, a manufacturer has to answer one question
 fast:
 
-> *"Which of our devices, technical files, notified-body certificates, market registrations and
-> open post-market obligations are affected — and by when?"*
+> *"Which of our devices, technical files, certificates, market registrations and open post-market
+> obligations are affected — and by when?"*
 
-Today that is a manual exercise across spreadsheets, documents and email. Every fact needed to
-answer it is already public — FDA clearances, device classifications, recalls, adverse events,
-the text of 21 CFR and EU MDR, notified-body certificates — but it is scattered across a dozen
-systems that don't reference each other.
+Today that is manual work across spreadsheets, documents and email. Every fact needed to answer it
+is already public — FDA clearances, device classifications, recalls, adverse events, the text of
+21 CFR — but it is scattered across sources that do not reference each other.
 
-As a graph it is a single traversal.
+As a graph it is one traversal:
 
 ```cypher
--- planned signature query: change blast-radius
-MATCH (c:Clause)<-[:GOVERNED_BY]-(d:Device)-[:REGISTERED_IN]->(j:Jurisdiction)
-WHERE c.id = $changed_clause
-RETURN j.name AS market, count(DISTINCT d) AS devices_affected
-ORDER BY devices_affected DESC
+// Change blast-radius: a 21 CFR section is amended — who is affected?
+MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)
+      -[:SUBMITTED_BY]->(m:Manufacturer)
+WHERE r.cfr_section = '870.5150'
+RETURN m.name AS manufacturer, count(DISTINCT s) AS clearances_affected
+ORDER BY clearances_affected DESC
 ```
 
-This is the same shape as the change-impact query in
-[`bank-model-risk-kg`](https://github.com/samyama-ai/bank-model-risk-kg) — *"if this data source
-changes, which regulatory submissions are exposed?"* — applied to device regulation.
+**This works because the FDA stamps the regulation number onto every clearance, approval and
+classification record.** The device-to-law join is exact and government-issued, not a name match.
+`870.5150` covers **415** clearances.
+
+*Results table lands with the loader — this repo does not print numbers it has not run.*
 
 ## Why a graph
 
 Device regulation has unusually strong identifiers — 510(k) K-numbers, PMA numbers, FDA product
-codes, UDI-DIs, EUDAMED identifiers. Joins across sources are **exact rather than name-based**,
-which makes federation reliable instead of approximate.
+codes, UDI-DIs. Joins across sources are **exact rather than name-based**.
 
 It also contains a structure that is natively a graph and poorly served elsewhere: **510(k)
-predicate chains.** Each clearance cites the predicate device it claims substantial equivalence
-to, forming a public citation DAG stretching back decades.
+predicate chains.** Every US clearance names the older device it claims substantial equivalence
+to, forming a public citation chain back to the 1976 Medical Device Amendments.
+
+Chains of unknown depth are what graph databases do well and relational databases do badly — you
+cannot write "keep going until the beginning" as a fixed join.
+
+**Those chains are partial by construction, and this repo says so.** The predicate device is not
+published in the FDA's API; it appears only inside the 510(k) Summary PDF, as a free-text device
+name, and sometimes names a pre-1976 device with no clearance record at all. Unresolved
+predecessors are modelled explicitly rather than dropped — a truncated chain that looks complete
+is worse than no chain.
 
 ## Scope
 
 **Medical devices** — not pharmaceuticals, not financial regulation.
 **Primary:** US (FDA) and EU (MDR/IVDR). **Secondary:** ANVISA, CDSCO, Health Canada, TGA,
-MHRA/UKCA. Reasoning and open challenges in [`docs/scope.md`](docs/scope.md).
+MHRA/UKCA.
 
 ## Data sources
 
-Device-first, in three tiers. Full table with licences in [`DATASET-CARD.md`](DATASET-CARD.md);
-per-source detail in [`docs/sources/`](docs/sources/).
+**8 openFDA device endpoints, 31,120,490 records**, all US-government public domain — measured
+live, never hand-entered. Reproduce with `python -m etl.probe_openfda`.
 
-- **Tier 1** — openFDA device endpoints (510(k), PMA, classification, registration & listing,
-  recalls, enforcement, MAUDE, UDI); 21 CFR Parts 800–898 via eCFR; FDA guidance and warning
-  letters
-- **Tier 2** — EU MDR 2017/745 and IVDR 2017/746 via EUR-Lex, Annex I GSPR, MDCG guidance,
-  EUDAMED, NANDO notified bodies, recognised consensus standards
+Quote the honest figure: **~5.75M is regulation-relevant.** 81.5% of the total is MAUDE
+adverse-event reports.
+
+Full table with per-source licences in [`DATASET-CARD.md`](DATASET-CARD.md).
+
+- **Tier 1** — openFDA (510(k), PMA, classification, registration & listing, recalls, enforcement,
+  MAUDE, UDI) plus the 510(k) Summary PDFs
+- **Tier 2** — 21 CFR via eCFR, FDA guidance and warning letters, EU MDR/IVDR via EUR-Lex,
+  EUDAMED, NANDO, recognised consensus standards
 - **Tier 3** — ANVISA, CDSCO, Health Canada, TGA, MHRA/UKCA
 
-Licensing is tracked per source. Notably, **ISO/IEC standard texts are paywalled** and are
-modelled as identifier and clause-reference nodes only — no standard text is ingested. Per the
-KG-repo convention, raw downloaded data is not committed; this repo ships loaders, schema and a
-bounded demo.
+**ISO/IEC standard texts are paywalled** and are modelled as identifier and clause-reference nodes
+only — no standard text is ingested. Per the KG-repo convention, raw downloaded data is not
+committed; this repo ships downloaders, loaders, schema and a bounded demo.
 
 ## Schema
 
-The ontology is drafted in
-[`docs/regulatory-affairs-kg-plan.md`](docs/regulatory-affairs-kg-plan.md) and lands in
-[`docs/schema.md`](docs/schema.md) and
-[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher) once source research
-confirms what the data actually supports. Both currently hold the generic placeholder ontology
-from the scaffold.
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher) — the executable
+ontology. **17 questions, 34 node labels, 39 edge types, 8 design decisions.**
+
+Derived from the questions a regulatory-affairs professional actually asks, in their language, not
+from the shape of any one source. Every node and edge exists because it turns one of those
+questions into a single traversal; anything serving none of them was left out.
+
+Two tiers: **loadable from public data today** (`Submission`, `ProductCode`, `Regulation`,
+`Manufacturer`, `Establishment`, `MarketedDevice`, `Recall`, `AdverseEvent`, `PredicateClaim`,
+`Standard`) and **modelled but deliberately unpopulated** — regulation text, EU market structures,
+obligations, AI governance, cybersecurity, privacy and data quality. The second tier is designed
+so the ontology does not need redesigning when a source appears.
+
+Every statement executes against Samyama-Graph 1.1.0, and
+[`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) keeps it that way.
 
 ## Quick Start
 
@@ -88,34 +109,42 @@ from the scaffold.
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-python -m etl.download_data          # fetch source data into data/
-python -m etl.loader                 # build + load the graph
-python -m mcp_server.server          # expose the KG over MCP
+python -m etl.probe_openfda          # measure the sources, live
 pytest                               # run tests
 ```
 
-## Structure
+Verify the schema against a live engine:
+
+```bash
+docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+pytest tests/test_schema_cypher.py
 ```
-etl/          # downloaders + graph loader
-schema/       # cypher schema / ontology
+
+Downloaders and loaders are stubs; `python -m etl.download_data` and `python -m etl.loader` do
+nothing yet.
+
+## Structure
+
+```
+etl/          # source probe (working); downloaders + loader (stubs)
+schema/       # the executable ontology
 mcp_server/   # MCP server exposing the KG
 demo/         # narrated demo (cast + gif)
 benchmarks/   # benchmark queries
-docs/         # design + source notes
 tests/        # pytest
-pyproject.toml
 ```
 
 ## Status
 
 | | |
 |---|---|
-| Repo scaffold | ✅ |
 | Scope decided | ✅ |
-| Spec | 🚧 outline in place, content in progress |
-| Data-source list | 🚧 sources identified, counts pending |
-| Loaders | ⬜ stubs only |
-| Query suite | ⬜ not started |
+| Source research | ✅ 8 endpoints measured live |
+| Ontology | ✅ 17 questions, 34 labels, 39 edges |
+| Schema verified against the engine | ✅ 36/36 statements, with a test |
+| Downloaders / loaders | ⬜ stubs only |
+| Data loaded | ⬜ none — no node or edge counts exist |
+| Query suite, snapshot, demo | ⬜ not started |
 
 ## License
 
