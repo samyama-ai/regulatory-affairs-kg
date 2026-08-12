@@ -88,15 +88,37 @@ from the scaffold.
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-python -m etl.download_data          # fetch source data into data/
-python -m etl.loader                 # build + load the graph
-python -m mcp_server.server          # expose the KG over MCP
+docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0 &
+
+python -m etl.probe_openfda          # measure the sources, live
+python -m etl.download_openfda       # fetch into data/  (~6 min)
+python -m etl.load_openfda           # build the graph   (~10 min)
 pytest                               # run tests
 ```
 
+That loads **28,496 nodes and 25,310 edges** — all 7,085 device classifications plus every
+21 CFR part 870 (cardiovascular) clearance. Then:
+
+```cypher
+MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)
+WHERE r.cfr_section = '870.5150'
+RETURN s.applicant AS applicant, count(s) AS clearances
+ORDER BY clearances DESC LIMIT 5
+```
+
+| applicant | clearances |
+|---|---:|
+| Penumbra, Inc. | 27 |
+| Inari Medical | 24 |
+| Inari Medical, Inc. | 23 |
+| Possis Medical, Inc. | 20 |
+| Ekos Corp. | 17 |
+
+**415 clearances** sit under that one rule.
+
 ## Structure
 ```
-etl/          # downloaders + graph loader
+etl/          # openFDA probe, downloader and loader
 schema/       # cypher schema / ontology
 mcp_server/   # MCP server exposing the KG
 demo/         # narrated demo (cast + gif)
@@ -110,12 +132,14 @@ pyproject.toml
 
 | | |
 |---|---|
-| Repo scaffold | ✅ |
 | Scope decided | ✅ |
-| Spec | 🚧 outline in place, content in progress |
-| Data-source list | 🚧 sources identified, counts pending |
-| Loaders | ⬜ stubs only |
-| Query suite | ⬜ not started |
+| Source research | ✅ 8 endpoints, 31,120,490 records, measured live |
+| Ontology | ✅ 17 questions, 34 labels, 39 edges |
+| Schema verified against the engine | ✅ 36/36 statements, with a test |
+| Downloader + loader | ✅ classifications + part 870 clearances |
+| **Graph loaded** | ✅ **28,496 nodes, 25,310 edges** — a bounded slice |
+| Predicate chains | ⬜ need PDF extraction; resolution rate unmeasured |
+| Query suite, snapshot, demo | ⬜ not started |
 
 ## License
 

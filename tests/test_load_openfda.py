@@ -1,0 +1,190 @@
+"""Tests for the openFDA loader.
+
+The offline tests cover `lit()`, which is the riskiest function in the loader:
+the engine takes no query parameters, so every value is interpolated into
+statement text and a bad literal is either a parse error or — worse — a silent
+corruption.
+
+The engine test loads a small fixture and asserts the graph, then loads it again
+and asserts the counts did not move. It skips when no engine is reachable.
+
+    docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    pytest tests/test_load_openfda.py
+"""
+
+import json
+import os
+import urllib.request
+
+import pytest
+
+from etl.load_openfda import SANITISED, Engine, lit, props
+
+SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
+
+
+# --------------------------------------------------------------------------
+# lit() — no engine needed
+# --------------------------------------------------------------------------
+
+def test_plain_value_is_double_quoted():
+    assert lit("Catheter") == '"Catheter"'
+
+
+def test_apostrophe_stays_in_double_quotes():
+    """Commonest case in this corpus — 377 values carry an apostrophe."""
+    assert lit("patient's device") == '"patient\'s device"'
+
+
+def test_double_quote_switches_to_single_quotes():
+    """The engine has no escape sequences: `\\"` is a parse error, so the quote
+    style has to change rather than the value."""
+    assert lit('a "personnel protective shield"') == "'a \"personnel protective shield\"'"
+
+
+def test_both_quote_types_is_recorded_not_silent():
+    """A value containing both cannot be represented. Altering it is defensible;
+    doing so silently is not."""
+    SANITISED.clear()
+    out = lit("""the patient's "shield" device""")
+    assert out.startswith('"') and out.endswith('"')
+    assert '"' not in out[1:-1]          # no bare double quote left inside
+    assert "”" in out                     # replaced, not deleted
+    assert len(SANITISED) == 1            # and reported
+
+
+def test_newlines_and_tabs_collapse():
+    """Not escaping — a literal newline breaks the parser and the engine offers
+    no way to encode one."""
+    assert lit("a\nb\tc\rd") == '"a b c d"'
+
+
+def test_none_is_null_not_the_string_none():
+    assert lit(None) == "null"
+
+
+def test_backslash_is_left_alone():
+    """`\\\\` is not an escape here; it passes through as two characters."""
+    assert lit(r"a\b") == '"a\\b"'
+
+
+def test_props_skips_empty_values_but_keeps_zero():
+    out = props({"a": "x", "b": None, "c": "", "d": [], "e": 0}, "n")
+    assert 'n.a = "x"' in out
+    for absent in ("n.b", "n.c", "n.d"):
+        assert absent not in out
+    assert "n.e" in out, "0 is a real value, not an empty one"
+
+
+# --------------------------------------------------------------------------
+# against a live engine
+# --------------------------------------------------------------------------
+
+def engine_available() -> bool:
+    try:
+        urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2).read()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark_engine = pytest.mark.skipif(
+    not engine_available(), reason=f"no Samyama engine at {SAMYAMA_URL}"
+)
+
+FIXTURE_CLASSIFICATIONS = [
+    {"product_code": "TST", "device_name": 'Test "quoted" device',
+     "device_class": "2", "regulation_number": "999.9001",
+     "medical_specialty_description": "Cardiovascular"},
+    {"product_code": "TS2", "device_name": "Second device",
+     "device_class": "1", "regulation_number": "999.9001"},
+    {"product_code": "TS3", "device_name": "Unclassified", "regulation_number": ""},
+]
+FIXTURE_CLEARANCES = [
+    {"k_number": "K999001", "device_name": "Widget A", "applicant": "Acme's Devices",
+     "product_code": "TST", "decision_date": "2024-01-01",
+     "openfda": {"regulation_number": "999.9001"}},
+    {"k_number": "K999002", "device_name": "Widget B", "applicant": "Beta Corp",
+     "product_code": "TST", "decision_date": "2024-02-01", "openfda": {}},
+    {"k_number": "K999003", "device_name": "Orphan", "applicant": "Gamma",
+     "product_code": "", "openfda": {}},
+]
+META = {"endpoint": "test", "retrieved_at": "2026-08-12T00:00:00+00:00"}
+
+
+def fresh_engine() -> Engine:
+    """A plain Engine against the default graph.
+
+    NOTE: tenants cannot be used to isolate a test. `/api/query` accepts a
+    `graph` field but **ignores it** — writes sent to a named tenant land in the
+    shared store and are visible from every other tenant. Measured on 1.1.0.
+    So these tests use fixture keys that cannot collide with real data
+    (product codes TST/TS2/TS3, K-numbers K9990xx, regulation 999.9001) and
+    assert on those rather than on global counts.
+    """
+    return Engine(SAMYAMA_URL, "default")
+
+
+def fixture_counts(engine: Engine) -> tuple:
+    return (
+        engine.scalar('MATCH (p:ProductCode) WHERE p.product_code IN ["TST","TS2","TS3"] RETURN count(p)'),
+        engine.scalar('MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" RETURN count(r)'),
+        engine.scalar('MATCH (s:Submission) WHERE s.id IN ["K999001","K999002","K999003"] RETURN count(s)'),
+        engine.scalar('MATCH (p:ProductCode)-[g:GOVERNED_BY]->(r:Regulation)'
+                      ' WHERE r.cfr_section = "999.9001" RETURN count(g)'),
+        engine.scalar('MATCH (s:Submission)-[c:CLASSIFIED_AS]->(:ProductCode)'
+                      ' WHERE s.id IN ["K999001","K999002","K999003"] RETURN count(c)'),
+    )
+
+
+@pytestmark_engine
+def test_loads_and_is_idempotent():
+    """The whole design rests on MERGE, because a uniqueness constraint in this
+    engine does not reject a duplicate CREATE. So loading twice must not double
+    anything — asserted, not assumed."""
+    from etl.load_openfda import load_classifications, load_clearances
+
+    engine = fresh_engine()
+    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
+    load_clearances(engine, FIXTURE_CLEARANCES, META)
+    first = fixture_counts(engine)
+
+    # 3 product codes; 1 regulation (TST and TS2 share 999.9001); 3 submissions;
+    # 2 GOVERNED_BY (TS3 has no regulation); 2 CLASSIFIED_AS (K999003 has no code).
+    assert first == (3, 1, 3, 2, 2), first
+
+    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
+    load_clearances(engine, FIXTURE_CLEARANCES, META)
+    assert fixture_counts(engine) == first, "loading twice changed the graph — MERGE is not holding"
+
+
+@pytestmark_engine
+def test_change_impact_query_traverses():
+    """Q1 end to end: a rule reaches its clearances in two hops."""
+    from etl.load_openfda import load_classifications, load_clearances
+
+    engine = fresh_engine()
+    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
+    load_clearances(engine, FIXTURE_CLEARANCES, META)
+
+    affected = engine.scalar(
+        "MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)"
+        ' WHERE r.cfr_section = "999.9001" RETURN count(s)'
+    )
+    assert affected == 2, f"expected both TST clearances, got {affected}"
+
+
+@pytestmark_engine
+def test_quoted_device_name_survives_the_round_trip():
+    """The fixture deliberately contains a double-quoted device name. If the
+    literal encoding is wrong this is where it shows up — either as a load
+    failure or as a mangled value."""
+    from etl.load_openfda import load_classifications
+
+    engine = fresh_engine()
+    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
+
+    name = engine.scalar(
+        'MATCH (p:ProductCode) WHERE p.product_code = "TST" RETURN p.device_name'
+    )
+    assert name == 'Test "quoted" device', repr(name)
