@@ -81,6 +81,11 @@ def lit(value) -> str:
     """
     if value is None:
         return "null"
+    if isinstance(value, (list, tuple)):
+        # openFDA harmonised fields arrive as arrays. str() on one yields a
+        # Python repr — ['a', 'b'] — which is not data. Join instead, and keep
+        # the ordering the API gave.
+        value = "; ".join(str(v) for v in value)
     text = str(value).replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
     if '"' not in text:
@@ -93,12 +98,25 @@ def lit(value) -> str:
 
 
 def props(pairs: dict, var: str) -> str:
-    """`var.key = <literal>` assignments, skipping empties."""
+    """`var.key = <literal>` assignments, skipping empties.
+
+    Returns "" when nothing survives — callers must check, because
+    `ON CREATE SET ` with an empty tail is a parse error.
+    """
     return ", ".join(
         f"{var}.{key} = {lit(value)}"
         for key, value in pairs.items()
         if value not in (None, "", [], {})
     )
+
+
+def merge(label: str, key: str, key_value, attributes: dict, var: str = "n") -> str:
+    """MERGE on the key, then set the rest — guarding the empty-SET case."""
+    assignments = props(attributes, var)
+    statement = f"MERGE ({var}:{label} {{{key}: {lit(key_value)}}})"
+    if assignments:
+        statement += f" ON CREATE SET {assignments} ON MATCH SET {assignments}"
+    return statement
 
 
 # --------------------------------------------------------------------------
@@ -110,17 +128,41 @@ class Engine:
         self.url = url.rstrip("/")
         self.graph = graph
         self.statements = 0
+        self.retries = 0
 
-    def run(self, query: str) -> dict:
-        request = urllib.request.Request(
-            f"{self.url}/api/query",
-            data=json.dumps({"query": query, "graph": self.graph}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            result = json.loads(urllib.request.urlopen(request, timeout=120).read())
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"{exc.code} on: {query[:140]}\n{exc.read().decode()[:300]}") from exc
+    def run(self, query: str, attempts: int = 4) -> dict:
+        """One statement, with backoff on transient failures.
+
+        A load is ~54,000 statements. Without this, a single blip leaves a
+        half-populated graph — and because every write is a MERGE, the safe
+        recovery is to re-run the whole thing, which costs ten minutes.
+        Retrying in place is cheaper and equally safe.
+
+        Parse errors and other 4xx are NOT retried: they will fail identically
+        every time, and hiding them behind four attempts only delays the report.
+        """
+        payload = json.dumps({"query": query, "graph": self.graph}).encode()
+        for attempt in range(attempts):
+            request = urllib.request.Request(
+                f"{self.url}/api/query", data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                result = json.loads(urllib.request.urlopen(request, timeout=120).read())
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode()[:300]
+                if exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                    self.retries += 1
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(f"{exc.code} on: {query[:140]}\n{body}") from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt < attempts - 1:
+                    self.retries += 1
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(f"unreachable on: {query[:140]}\n{exc}") from exc
         if "error" in result:
             raise RuntimeError(f"{result['error'][:300]}\n  on: {query[:140]}")
         self.statements += 1
@@ -131,11 +173,19 @@ class Engine:
         return records[0][0] if records and records[0] else None
 
     def apply_schema(self) -> int:
-        body = " ".join(
-            line for line in SCHEMA.read_text().splitlines()
-            if not line.strip().startswith("//")
-        )
-        statements = [s.strip() for s in body.split(";") if s.strip()]
+        """Apply schema/regulatory_affairs_kg.cypher.
+
+        Comments are stripped per line BEFORE joining. Dropping only lines that
+        *start* with `//` and then flattening would let one trailing comment
+        swallow every statement after it — silently, since the engine would just
+        see a shorter script and report success.
+        """
+        lines = []
+        for line in SCHEMA.read_text().splitlines():
+            code = line.split("//", 1)[0].strip()
+            if code:
+                lines.append(code)
+        statements = [s.strip() for s in " ".join(lines).split(";") if s.strip()]
         for statement in statements:
             self.run(statement)
         return len(statements)
@@ -152,7 +202,12 @@ def read(name: str) -> tuple[list[dict], dict]:
             f"{path} not found. Run `python -m etl.download_openfda` first."
         )
     payload = json.loads(path.read_text())
-    return payload["results"], payload["meta"]
+    if "results" not in payload:
+        raise SystemExit(f"{path} has no 'results' — re-run the downloader.")
+    meta = payload.get("meta") or {}
+    meta.setdefault("endpoint", f"device/{name}")
+    meta.setdefault("retrieved_at", "unknown")
+    return payload["results"], meta
 
 
 def load_classifications(engine: Engine, rows: list[dict], meta: dict) -> dict:
@@ -185,11 +240,7 @@ def load_classifications(engine: Engine, rows: list[dict], meta: dict) -> dict:
             "life_sustain_flag": row.get("life_sustain_support_flag"),
             **provenance,
         }
-        assignments = props(attributes, "p")
-        engine.run(
-            f'MERGE (p:ProductCode {{product_code: {lit(code)}}})'
-            f' ON CREATE SET {assignments} ON MATCH SET {assignments}'
-        )
+        engine.run(merge("ProductCode", "product_code", code, attributes, "p"))
         counts["ProductCode"] += 1
 
         section = (row.get("regulation_number") or "").strip()
@@ -200,11 +251,7 @@ def load_classifications(engine: Engine, rows: list[dict], meta: dict) -> dict:
             if section not in seen_regulations:
                 part = section.split(".")[0]
                 regulation = {"part": part, "section": section, **provenance}
-                assign_r = props(regulation, "r")
-                engine.run(
-                    f'MERGE (r:Regulation {{cfr_section: {lit(section)}}})'
-                    f' ON CREATE SET {assign_r} ON MATCH SET {assign_r}'
-                )
+                engine.run(merge("Regulation", "cfr_section", section, regulation, "r"))
                 seen_regulations.add(section)
                 counts["Regulation"] += 1
             engine.run(
@@ -269,11 +316,7 @@ def load_clearances(engine: Engine, rows: list[dict], meta: dict) -> dict:
             "regulation_number": openfda.get("regulation_number"),
             **provenance,
         }
-        assignments = props(attributes, "s")
-        engine.run(
-            f'MERGE (s:Submission {{id: {lit(k_number)}}})'
-            f' ON CREATE SET {assignments} ON MATCH SET {assignments}'
-        )
+        engine.run(merge("Submission", "id", k_number, attributes, "s"))
         counts["Submission"] += 1
 
         code = (row.get("product_code") or "").strip()
@@ -338,8 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.time() - started
     graph = measure(engine)
 
-    print(f"\n  {engine.statements:,} statements in {elapsed:.0f}s "
-          f"({engine.statements / elapsed:.0f}/sec)\n")
+    rate = f"{engine.statements / elapsed:.0f}/sec" if elapsed > 0 else "instant"
+    retried = f", {engine.retries} retried" if engine.retries else ""
+    print(f"\n  {engine.statements:,} statements in {elapsed:.0f}s ({rate}){retried}\n")
     print("  nodes")
     for label, count in graph["nodes"].items():
         print(f"    {label:14} {count:>9,}")
@@ -365,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (DATA_DIR / "load-report.json").write_text(
         json.dumps({"measured_at": stamp, "elapsed_seconds": round(elapsed, 1),
-                    "statements": engine.statements,
+                    "statements": engine.statements, "retries": engine.retries,
                     "sanitised_values": len(SANITISED), **graph}, indent=2)
     )
     print(f"\n  report -> data/load-report.json")

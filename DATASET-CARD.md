@@ -165,8 +165,6 @@ The change-impact query returns **415** clearances for `870.5150` — matching t
 returns for the same filter, arrived at independently. Loading the same data twice leaves both
 counts unchanged.
 
-
-
 | Step | Status |
 |---|---|
 | Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
@@ -175,8 +173,7 @@ counts unchanged.
 | Downloader | ✅ [`etl/download_openfda.py`](etl/download_openfda.py) — classifications + a scoped 510(k) slice |
 | Loader | ✅ [`etl/load_openfda.py`](etl/load_openfda.py) — MERGE-based, idempotence proven by test |
 | Predicate chains | ❌ needs PDF extraction; resolution rate unmeasured |
-| Snapshot, demo | ❌ not built |
-| Snapshot | ❌ none |
+| Snapshot, demo GIF | ❌ not built |
 
 Reproduce the measurements:
 
@@ -223,7 +220,7 @@ Note "Inari Medical" and "Inari Medical, Inc." arriving as separate applicants. 
 are not normalised at source — which is exactly why the schema keys on `product_code` and treats
 names as properties, never as keys.
 
-Six engine behaviours constrain how these queries and the loader must be written; see Known
+Seven engine behaviours constrain how these queries and the loader must be written; see Known
 issues.
 
 ## Known issues

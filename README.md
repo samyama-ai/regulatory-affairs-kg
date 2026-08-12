@@ -89,11 +89,14 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0 &
+until curl -sf http://localhost:8080/api/tenants >/dev/null; do sleep 1; done
 
 python -m etl.probe_openfda          # measure the sources, live
 python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
 pytest                               # run tests
+python -m demo.demo                  # narrated walkthrough
+python -m mcp_server.server          # expose the KG over MCP (scaffold)
 ```
 
 That loads **28,496 nodes and 25,310 edges** — all 7,085 device classifications plus every
@@ -116,6 +119,11 @@ ORDER BY clearances DESC LIMIT 5
 
 **415 clearances** sit under that one rule.
 
+Note *Inari Medical* and *Inari Medical, Inc.* arriving separately — **applicant names are not
+normalised at source and this graph does not normalise them either.** That is why the schema keys
+on `product_code` and treats names as properties, never as keys. Entity resolution over applicants
+is not modelled.
+
 ## Structure
 ```
 etl/          # openFDA probe, downloader and loader
@@ -132,6 +140,7 @@ pyproject.toml
 
 | | |
 |---|---|
+| Repo scaffold | ✅ |
 | Scope decided | ✅ |
 | Source research | ✅ 8 endpoints, 31,120,490 records, measured live |
 | Ontology | ✅ 17 questions, 34 labels, 39 edges |

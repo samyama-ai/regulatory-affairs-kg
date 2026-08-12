@@ -70,10 +70,25 @@ def test_backslash_is_left_alone():
 
 def test_props_skips_empty_values_but_keeps_zero():
     out = props({"a": "x", "b": None, "c": "", "d": [], "e": 0}, "n")
-    assert 'n.a = "x"' in out
-    for absent in ("n.b", "n.c", "n.d"):
-        assert absent not in out
-    assert "n.e" in out, "0 is a real value, not an empty one"
+    assert out == 'n.a = "x", n.e = "0"', out
+
+
+def test_props_returns_empty_string_when_nothing_survives():
+    """`ON CREATE SET ` with an empty tail is a parse error — merge() checks
+    this, so props() must report emptiness rather than something truthy."""
+    assert props({"a": None, "b": ""}, "n") == ""
+
+
+def test_merge_omits_the_set_clause_when_there_is_nothing_to_set():
+    from etl.load_openfda import merge
+    assert merge("L", "k", "v", {}, "n") == 'MERGE (n:L {k: "v"})'
+    assert "ON CREATE SET" in merge("L", "k", "v", {"a": "x"}, "n")
+
+
+def test_list_values_are_joined_not_repred():
+    """openFDA harmonised fields arrive as arrays. str() on one yields a Python
+    repr, which is not data."""
+    assert lit(["870.5150", "870.1250"]) == '"870.5150; 870.1250"'
 
 
 # --------------------------------------------------------------------------
@@ -125,6 +140,38 @@ def fresh_engine() -> Engine:
     return Engine(SAMYAMA_URL, "default")
 
 
+FIXTURE_CODES = '["TST","TS2","TS3"]'
+FIXTURE_KS = '["K999001","K999002","K999003"]'
+
+
+@pytest.fixture
+def loaded_fixture():
+    """Hand back an engine, then delete everything the fixture created.
+
+    Tenants cannot isolate this — `/api/query` ignores the `graph` field — so
+    the fixture shares the default graph with whatever else is loaded. Without
+    teardown these nodes persist, which corrupts the next run's counts and, on
+    a developer's machine, quietly pollutes a real graph.
+
+    The delete is asserted, not hoped for: if it silently failed the next test
+    run would still pass while the graph filled up.
+    """
+    engine = fresh_engine()
+    yield engine
+    for query in (
+        f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} DETACH DELETE p",
+        f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} DETACH DELETE s",
+        'MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" DETACH DELETE r',
+    ):
+        engine.run(query)
+    left = (
+        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} RETURN count(p)"),
+        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} RETURN count(s)"),
+        engine.scalar('MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" RETURN count(r)'),
+    )
+    assert left == (0, 0, 0), f"teardown left fixture nodes behind: {left}"
+
+
 def fixture_counts(engine: Engine) -> tuple:
     return (
         engine.scalar('MATCH (p:ProductCode) WHERE p.product_code IN ["TST","TS2","TS3"] RETURN count(p)'),
@@ -138,13 +185,13 @@ def fixture_counts(engine: Engine) -> tuple:
 
 
 @pytestmark_engine
-def test_loads_and_is_idempotent():
+def test_loads_and_is_idempotent(loaded_fixture):
     """The whole design rests on MERGE, because a uniqueness constraint in this
     engine does not reject a duplicate CREATE. So loading twice must not double
     anything — asserted, not assumed."""
     from etl.load_openfda import load_classifications, load_clearances
 
-    engine = fresh_engine()
+    engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
     load_clearances(engine, FIXTURE_CLEARANCES, META)
     first = fixture_counts(engine)
@@ -159,11 +206,11 @@ def test_loads_and_is_idempotent():
 
 
 @pytestmark_engine
-def test_change_impact_query_traverses():
+def test_change_impact_query_traverses(loaded_fixture):
     """Q1 end to end: a rule reaches its clearances in two hops."""
     from etl.load_openfda import load_classifications, load_clearances
 
-    engine = fresh_engine()
+    engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
     load_clearances(engine, FIXTURE_CLEARANCES, META)
 
@@ -175,13 +222,13 @@ def test_change_impact_query_traverses():
 
 
 @pytestmark_engine
-def test_quoted_device_name_survives_the_round_trip():
+def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
     """The fixture deliberately contains a double-quoted device name. If the
     literal encoding is wrong this is where it shows up — either as a load
     failure or as a mangled value."""
     from etl.load_openfda import load_classifications
 
-    engine = fresh_engine()
+    engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
 
     name = engine.scalar(
