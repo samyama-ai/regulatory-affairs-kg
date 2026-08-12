@@ -24,7 +24,7 @@ badly.
 |---|---|
 | **Nodes** | **28,496** — measured 2026-08-12 (bounded slice, see *Provenance*) |
 | **Edges** | **25,310** — measured 2026-08-12 |
-| **Source records available** | **31,120,490** across 8 openFDA endpoints (**~5.75M** excluding MAUDE adverse events) |
+| **Source records available** | **31,120,490** across 8 openFDA endpoints; **668,381** are the authorisation and oversight record — see below |
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`docs/schema.md`](docs/schema.md) for labels, edges and the design decisions behind them |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
@@ -53,9 +53,30 @@ follow only once a loader exists.
 | **510(k) Summary PDFs** | FDA | Predicate device, standards conformed to | ≤ 175,686 (not all filed) | PDF | `accessdata.fda.gov/cdrh_docs/` | Public domain (US Gov) |
 | **openFDA subtotal** | | | **31,120,490** | | | |
 
-**81.5% of that total is MAUDE adverse-event reports.** The regulation-relevant core — clearances,
-approvals, classification, registrations, UDI, recalls and enforcement — is **~5,752,329 records**.
-Quote that figure rather than the headline when the question is about graph scale.
+### Which number to quote
+
+**81.5% of the total is MAUDE adverse-event reports**, so 31 million overstates
+graph-relevant scale. But the obvious next figure — 5,752,329 excluding adverse
+events — needs its own caveat: **88.4% of *that* is UDI** (5,083,948), and UDI
+does not reliably join to clearances. That is not a data-quality complaint; it is
+a deliberate schema decision, because the FDA publishes no link between a
+clearance and the device as sold.
+
+Three honest figures, not one:
+
+| Figure | What it covers |
+|---:|---|
+| **31,120,490** | Everything. 81.5% adverse-event reports. |
+| **5,752,329** | Excluding adverse events. **88.4% of this is UDI.** |
+| **668,381** | Clearances, approvals, classification, registrations, recalls and enforcement — **the authorisation and oversight record** |
+
+**Quote 668,381 when the question is about the regulatory backbone.** Quote
+5,752,329 only where UDI genuinely belongs in the answer, and say that it
+dominates. The 31M headline is true and misleading.
+
+This correction was made on 2026-08-12: the card previously called 5,752,329 the
+"regulation-relevant core", which overstated what is usable for the questions
+this graph exists to answer.
 
 ## Composition — Tier 2, identified but not yet researched
 
