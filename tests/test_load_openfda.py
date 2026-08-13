@@ -15,12 +15,15 @@ and asserts the counts did not move. It skips when no engine is reachable.
 import json
 import os
 import urllib.request
+from pathlib import Path
 
 import pytest
 
-from etl.load_openfda import SANITISED, Engine, lit, props, split_statements
+from etl.cypher import SANITISED, lit, merge, props, split_statements
+from etl.load_openfda import Engine, load_classifications, load_clearances
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
 
 
 # --------------------------------------------------------------------------
@@ -115,10 +118,19 @@ def test_a_trailing_comment_does_not_swallow_what_follows():
     assert len(split_statements(text)) == 2
 
 
-def test_the_real_schema_still_yields_36_statements():
-    from pathlib import Path
-    schema = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
-    assert len(split_statements(schema.read_text())) == 36
+def test_the_real_schema_splits_into_sound_statements():
+    """Structure first, then the count — so a contributor adding an index gets
+    a message rather than `assert 37 == 36`."""
+    schema = SCHEMA_PATH.read_text()
+    statements = split_statements(schema)
+    assert all(s.strip() for s in statements), "an empty statement survived the split"
+    assert not [s for s in statements if "//" in s], \
+        f"a comment leaked into a statement: {[s for s in statements if '//' in s][:2]}"
+    assert len(statements) == 36, (
+        f"{SCHEMA_PATH.name} now splits into {len(statements)} statements, not 36. "
+        f"If that is a deliberate schema change, update this test, the README "
+        f"and DATASET-CARD together. Statements: {[s[:60] for s in statements]}"
+    )
 
 
 def test_none_is_null_not_the_string_none():
@@ -131,6 +143,10 @@ def test_backslash_is_left_alone():
 
 
 def test_props_skips_empty_values_but_keeps_zero():
+    """Note `n.e = "0"` — the integer is stored as a string. That is not a slip:
+    /api/query takes no parameters, so every value is interpolated as text and
+    the engine has no way to be told otherwise. It is why queries on this graph
+    compare strings, and it is recorded in the dataset card."""
     out = props({"a": "x", "b": None, "c": "", "d": [], "e": 0}, "n")
     assert out == 'n.a = "x", n.e = "0"', out
 
@@ -142,7 +158,6 @@ def test_props_returns_empty_string_when_nothing_survives():
 
 
 def test_merge_omits_the_set_clause_when_there_is_nothing_to_set():
-    from etl.load_openfda import merge
     assert merge("L", "k", "v", {}, "n") == 'MERGE (n:L {k: "v"})'
     assert "ON CREATE SET" in merge("L", "k", "v", {"a": "x"}, "n")
 
@@ -159,7 +174,8 @@ def test_list_values_are_joined_not_repred():
 
 def engine_available() -> bool:
     try:
-        urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2).read()
+        with urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2) as response:
+            response.read()          # `with`, so the socket is not left open
         return True
     except Exception:
         return False
@@ -234,6 +250,12 @@ def loaded_fixture():
     run would still pass while the graph filled up.
 
     Skips at call time when no engine is reachable — see `require_engine`.
+
+    The three tests using this fixture are marked `xdist_group("engine")`.
+    They share one store and tear down by key, so running them concurrently
+    would let one test's teardown delete rows another is asserting on. The
+    `sanitised_log` fixture guards the same hazard for the module global; this
+    is the engine-side half of it.
     """
     require_engine()
     engine = fresh_engine()
@@ -264,12 +286,11 @@ def fixture_counts(engine: Engine) -> tuple:
     )
 
 
+@pytest.mark.xdist_group("engine")
 def test_loads_and_is_idempotent(loaded_fixture):
     """The whole design rests on MERGE, because a uniqueness constraint in this
     engine does not reject a duplicate CREATE. So loading twice must not double
     anything — asserted, not assumed."""
-    from etl.load_openfda import load_classifications, load_clearances
-
     engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
     load_clearances(engine, FIXTURE_CLEARANCES, META)
@@ -284,10 +305,9 @@ def test_loads_and_is_idempotent(loaded_fixture):
     assert fixture_counts(engine) == first, "loading twice changed the graph — MERGE is not holding"
 
 
+@pytest.mark.xdist_group("engine")
 def test_change_impact_query_traverses(loaded_fixture):
     """Q1 end to end: a rule reaches its clearances in two hops."""
-    from etl.load_openfda import load_classifications, load_clearances
-
     engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
     load_clearances(engine, FIXTURE_CLEARANCES, META)
@@ -299,12 +319,11 @@ def test_change_impact_query_traverses(loaded_fixture):
     assert affected == 2, f"expected both TST clearances, got {affected}"
 
 
+@pytest.mark.xdist_group("engine")
 def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
     """The fixture deliberately contains a double-quoted device name. If the
     literal encoding is wrong this is where it shows up — either as a load
     failure or as a mangled value."""
-    from etl.load_openfda import load_classifications
-
     engine = loaded_fixture
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
 

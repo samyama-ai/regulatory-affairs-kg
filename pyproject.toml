@@ -19,3 +19,11 @@ include = ["etl*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # The engine has no tenant isolation — /api/query ignores the `graph`
+    # field — so every engine-backed test writes into one shared store and
+    # tears down by key. Running them concurrently would let one test's
+    # teardown delete rows another is still asserting on. Declared serial
+    # rather than worked around, because the constraint is the engine's.
+    "xdist_group: run these together, in one worker, in order",
+]
