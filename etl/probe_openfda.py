@@ -1,8 +1,8 @@
 """Probe the openFDA device endpoints — record counts and field inventory.
 
-Every number in the openFDA source research (Solutions wiki: regulatory-affairs/wiki/sources/kg-openfda-devices-source-research.md) and in the openFDA rows of
-`DATASET-CARD.md` comes from this script. Re-run it to verify them; do not
-hand-edit counts into the docs.
+Every number in the openFDA source research — an internal design record — and in
+the openFDA rows of `DATASET-CARD.md` comes from this script. Re-run it to verify
+them; do not hand-edit counts into the docs.
 
 openFDA returns `meta.results.total` on every response — the number of records
 matching the query. With `limit=1` that gives an exact count for one request.
