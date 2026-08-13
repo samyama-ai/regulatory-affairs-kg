@@ -95,7 +95,6 @@ python -m etl.probe_openfda          # measure the sources, live
 python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
 pytest                               # run tests
-python -m demo.demo                  # narrated walkthrough
 python -m mcp_server.server          # expose the KG over MCP (scaffold)
 ```
 
