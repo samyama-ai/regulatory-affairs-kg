@@ -86,7 +86,10 @@ def lit(value) -> str:
         # Python repr — ['a', 'b'] — which is not data. Join instead, and keep
         # the ordering the API gave.
         value = "; ".join(str(v) for v in value)
-    text = str(value).replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    # Every control character, not just the three common ones. NUL, vertical
+    # tab and form feed reach the parser otherwise, and the engine's response
+    # to those is not something to discover during a 54,000-statement load.
+    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in str(value))
 
     if '"' not in text:
         return f'"{text}"'
@@ -95,6 +98,46 @@ def lit(value) -> str:
 
     SANITISED.append(text[:120])
     return '"' + text.replace('"', "”") + '"'
+
+
+def split_statements(text: str) -> list[str]:
+    """Cypher statements from a script, respecting string literals.
+
+    A `//` inside a quoted value starts no comment and a `;` inside one ends no
+    statement. Walking the text once with a quote flag is enough — the engine
+    has no escape sequences, so a delimiter inside a literal is impossible and
+    the next matching quote always closes it.
+    """
+    out: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            i += 1
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+        elif text.startswith("//", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            current.append(" ")
+            continue
+        elif char == ";":
+            out.append(" ".join("".join(current).split()))
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    tail = " ".join("".join(current).split())
+    if tail:
+        out.append(tail)
+    return [s for s in out if s]
 
 
 def props(pairs: dict, var: str) -> str:
@@ -141,6 +184,8 @@ class Engine:
         Parse errors and other 4xx are NOT retried: they will fail identically
         every time, and hiding them behind four attempts only delays the report.
         """
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
         payload = json.dumps({"query": query, "graph": self.graph}).encode()
         for attempt in range(attempts):
             request = urllib.request.Request(
@@ -175,17 +220,17 @@ class Engine:
     def apply_schema(self) -> int:
         """Apply schema/regulatory_affairs_kg.cypher.
 
-        Comments are stripped per line BEFORE joining. Dropping only lines that
-        *start* with `//` and then flattening would let one trailing comment
-        swallow every statement after it — silently, since the engine would just
-        see a shorter script and report success.
+        Comments are stripped BEFORE joining. Dropping only lines that *start*
+        with `//` and then flattening would let one trailing comment swallow
+        every statement after it — silently, since the engine would just see a
+        shorter script and report success.
+
+        Both `//` and `;` are honoured only outside string literals. Splitting
+        on them blindly truncates any statement containing a URL or a semicolon
+        inside a quoted value — again silently. Nothing in the schema does that
+        today; this is here so that adding one is not a trap.
         """
-        lines = []
-        for line in SCHEMA.read_text().splitlines():
-            code = line.split("//", 1)[0].strip()
-            if code:
-                lines.append(code)
-        statements = [s.strip() for s in " ".join(lines).split(";") if s.strip()]
+        statements = split_statements(SCHEMA.read_text())
         for statement in statements:
             self.run(statement)
         return len(statements)
@@ -223,6 +268,10 @@ def load_classifications(engine: Engine, rows: list[dict], meta: dict) -> dict:
         "extraction_method": "api",
     }
     seen_regulations: set[str] = set()
+    # Statements ISSUED, not rows written. A MERGE that matches an existing
+    # node still counts here, and a MATCH...MERGE whose endpoints are absent
+    # no-ops while still counting. `measure()` reads the graph itself and is
+    # the only figure reported as a node or edge count.
     counts = {"ProductCode": 0, "Regulation": 0, "GOVERNED_BY": 0, "no_regulation": 0}
 
     for index, row in enumerate(rows, 1):
@@ -290,6 +339,7 @@ def load_clearances(engine: Engine, rows: list[dict], meta: dict) -> dict:
         "retrieved_at": meta["retrieved_at"],
         "extraction_method": "api",
     }
+    # Statements issued — see the note in load_classifications.
     counts = {"Submission": 0, "CLASSIFIED_AS": 0, "no_product_code": 0}
 
     for index, row in enumerate(rows, 1):
@@ -371,9 +421,25 @@ def main(argv: list[str] | None = None) -> int:
     classifications, class_meta = read("classification")
     clearances, clear_meta = read("510k")
     if args.limit:
-        classifications = classifications[: args.limit]
+        # Truncating both sources independently produces a smoke load whose
+        # CLASSIFIED_AS edges all resolve to nothing: the first N clearances do
+        # not reference the first N product codes — measured, it is zero
+        # overlap at --limit 50. The MATCH then no-ops silently and the run
+        # still looks fine, which is the worst kind of green.
+        #
+        # So the clearances are chosen first and the classifications follow
+        # from them, guaranteeing the join exists. Padded back up to the limit
+        # so the classification path is still exercised on its own.
         clearances = clearances[: args.limit]
-        print(f"  --limit {args.limit}: smoke load only\n")
+        wanted = {(c.get("product_code") or "").strip() for c in clearances}
+        needed = [c for c in classifications
+                  if (c.get("product_code") or "").strip() in wanted]
+        rest = [c for c in classifications
+                if (c.get("product_code") or "").strip() not in wanted]
+        classifications = needed + rest[: max(0, args.limit - len(needed))]
+        print(f"  --limit {args.limit}: smoke load only — {len(clearances):,} "
+              f"clearances and the {len(needed):,} product code(s) they join "
+              f"to, padded to {len(classifications):,}\n")
 
     class_counts = load_classifications(engine, classifications, class_meta)
     clear_counts = load_clearances(engine, clearances, clear_meta)

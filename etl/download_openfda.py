@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -36,6 +37,25 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PAGE = 1000                     # openFDA's maximum
 SKIP_CAP = 25_000               # hard limit without an API key
 USER_AGENT = "regulatory-affairs-kg/0.1 (+https://github.com/samyama-ai)"
+
+# openFDA allows 240 requests/minute without an API key. Staying under it by
+# construction is better than discovering it as a 429 mid-download: a whole
+# endpoint is re-paged on a failed integrity check, so a throttled run is
+# cheaper than a retried one.
+MIN_REQUEST_INTERVAL = 60 / 240
+_last_request_at = 0.0
+
+# A CFR part is three digits (800-898 for devices). Validated because it is
+# interpolated into the openFDA `search` expression, where a value carrying
+# `+AND+` or a quote would silently change what the query means rather than
+# erroring — and a query that returns the wrong rows still writes a file.
+PART_PATTERN = re.compile(r"^\d{3}$")
+
+# How many times to re-page an endpoint whose integrity check fails. Unordered
+# paging on `classification` can shuffle between requests; that is transient
+# and a second pass usually lands clean, so this is not a hard failure on the
+# first try. It still refuses in the end rather than writing a suspect set.
+PAGING_ATTEMPTS = 3
 
 
 # Paging is a sequence of independent requests, and openFDA guarantees no order
@@ -63,6 +83,15 @@ SORT_KEY = {"510k": "k_number.exact"}
 UNIQUE_KEY = {"classification": "product_code", "510k": "k_number"}
 
 
+def throttle() -> None:
+    """Space requests so the unauthenticated rate limit is never reached."""
+    global _last_request_at
+    wait = MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_at = time.monotonic()
+
+
 def fetch(endpoint: str, *, search: str | None = None, limit: int = 1, skip: int = 0) -> dict:
     """One request. Raises on anything that is not a clean 200 with results."""
     params = {"limit": limit, "skip": skip}
@@ -74,6 +103,7 @@ def fetch(endpoint: str, *, search: str | None = None, limit: int = 1, skip: int
     url = f"{API}/device/{endpoint}.json?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     for attempt in range(4):
+        throttle()
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
                 return json.loads(response.read())
@@ -120,6 +150,22 @@ def fetch_all(endpoint: str, search: str | None = None) -> list[dict]:
             f"skip cap. Narrow the filter or use bulk downloads — do not load a "
             f"truncated set and call it complete."
         )
+    for attempt in range(1, PAGING_ATTEMPTS + 1):
+        rows = page_through(endpoint, search, count)
+        problem = integrity_problem(endpoint, rows, count)
+        if problem is None:
+            return rows
+        if attempt < PAGING_ATTEMPTS:
+            print(f"  {problem}\n  re-paging {endpoint} "
+                  f"(attempt {attempt + 1} of {PAGING_ATTEMPTS})")
+            time.sleep(2 ** attempt)
+    raise ValueError(
+        f"{problem} Still wrong after {PAGING_ATTEMPTS} attempts — refusing to "
+        f"write a set that would look complete."
+    )
+
+
+def page_through(endpoint: str, search: str | None, count: int) -> list[dict]:
     rows: list[dict] = []
     while len(rows) < count:
         page = fetch(endpoint, search=search, limit=PAGE, skip=len(rows))["results"]
@@ -128,29 +174,33 @@ def fetch_all(endpoint: str, search: str | None = None) -> list[dict]:
         rows.extend(page)
         print(f"  {endpoint}: {len(rows):,}/{count:,}", end="\r", flush=True)
     print(f"  {endpoint}: {len(rows):,}/{count:,}      ")
-    check_unique(endpoint, rows, count)
     return rows
 
 
-def check_unique(endpoint: str, rows: list[dict], expected: int) -> None:
-    """Refuse a result set that lost or duplicated records while paging.
+def integrity_problem(endpoint: str, rows: list[dict], expected: int) -> str | None:
+    """Describe what is wrong with a paged result set, or None if it is sound.
 
     This is what actually guards the download. `sort` pins the order on the one
     endpoint that supports it; this catches the failure on both, by counting
     distinct keys rather than trusting the row count.
+
+    Rows missing the key are reported separately rather than quietly dropped —
+    a renamed field would otherwise arrive disguised as a paging fault, sending
+    the reader after the wrong bug.
     """
     key = UNIQUE_KEY.get(endpoint)
     if not key:
-        return
-    keys = [r[key] for r in rows if r.get(key)]
-    unique = len(set(keys))
-    if unique == expected:
-        return
-    raise ValueError(
-        f"{endpoint}: paged {len(rows):,} rows carrying {unique:,} distinct "
-        f"`{key}` values, but the API reported {expected:,}. Paging dropped or "
-        f"duplicated records — refusing to write a set that would look complete."
-    )
+        return None
+    missing = sum(1 for r in rows if not r.get(key))
+    if missing:
+        return (f"{endpoint}: {missing:,} of {len(rows):,} rows carry no `{key}`. "
+                f"That is a renamed or absent field, not a paging fault.")
+    unique = len({r[key] for r in rows})
+    if unique != expected:
+        return (f"{endpoint}: paged {len(rows):,} rows carrying {unique:,} distinct "
+                f"`{key}` values, but the API reported {expected:,} — paging "
+                f"dropped or duplicated records.")
+    return None
 
 
 def write(name: str, rows: list[dict], meta: dict) -> Path:
@@ -162,6 +212,13 @@ def write(name: str, rows: list[dict], meta: dict) -> Path:
 
 
 def download(part: str = "870") -> None:
+    if not PART_PATTERN.match(part):
+        raise ValueError(
+            f"`--part {part}` is not a three-digit CFR part. This value is "
+            f"interpolated into the openFDA search expression, so anything else "
+            f"changes what the query means rather than failing — devices are "
+            f"parts 800-898."
+        )
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"openFDA download  ({stamp})\n")
 
@@ -188,7 +245,9 @@ def download(part: str = "870") -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # __doc__ is None under `python -OO`, which strips docstrings.
+    summary = (__doc__ or "").splitlines()
+    parser = argparse.ArgumentParser(description=summary[0] if summary else None)
     parser.add_argument(
         "--part", default="870",
         help="21 CFR part to scope 510(k) to (default 870, cardiovascular).",
@@ -199,6 +258,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"\nrefused: {exc}", file=sys.stderr)
         return 1
+    except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+        # Network trouble after the retries in `fetch` are spent. A traceback
+        # here reads as a bug in this script rather than as the API being
+        # unreachable, which is what it actually means.
+        print(f"\nopenFDA unreachable: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

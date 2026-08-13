@@ -42,15 +42,25 @@ def test_double_quote_switches_to_single_quotes():
     assert lit('a "personnel protective shield"') == "'a \"personnel protective shield\"'"
 
 
-def test_both_quote_types_is_recorded_not_silent():
+@pytest.fixture
+def sanitised_log():
+    """SANITISED is a module-level list. A test that clears it in place makes
+    itself order-dependent and unsafe under -p xdist; this saves and restores
+    it instead."""
+    saved = list(SANITISED)
+    SANITISED.clear()
+    yield SANITISED
+    SANITISED[:] = saved
+
+
+def test_both_quote_types_is_recorded_not_silent(sanitised_log):
     """A value containing both cannot be represented. Altering it is defensible;
     doing so silently is not."""
-    SANITISED.clear()
     out = lit("""the patient's "shield" device""")
     assert out.startswith('"') and out.endswith('"')
     assert '"' not in out[1:-1]          # no bare double quote left inside
     assert "”" in out                     # replaced, not deleted
-    assert len(SANITISED) == 1            # and reported
+    assert len(sanitised_log) == 1        # and reported
 
 
 def test_newlines_and_tabs_collapse():
@@ -103,9 +113,15 @@ def engine_available() -> bool:
         return False
 
 
-pytestmark_engine = pytest.mark.skipif(
-    not engine_available(), reason=f"no Samyama engine at {SAMYAMA_URL}"
-)
+def require_engine() -> None:
+    """Skip at call time, not at import time.
+
+    `pytest.mark.skipif(not engine_available())` freezes the decision during
+    collection — start the engine while the suite is collecting and the tests
+    still skip, reporting green for something that was never run.
+    """
+    if not engine_available():
+        pytest.skip(f"no Samyama engine at {SAMYAMA_URL}")
 
 FIXTURE_CLASSIFICATIONS = [
     {"product_code": "TST", "device_name": 'Test "quoted" device',
@@ -140,8 +156,17 @@ def fresh_engine() -> Engine:
     return Engine(SAMYAMA_URL, "default")
 
 
-FIXTURE_CODES = '["TST","TS2","TS3"]'
-FIXTURE_KS = '["K999001","K999002","K999003"]'
+# One source of truth for the fixture keys. They are deliberately shaped so
+# they cannot collide with real openFDA data: FDA product codes are three
+# letters and none is "TST"/"TS2"/"TS3", K-numbers of the form K999xxx are not
+# issued, and CFR part 999 does not exist. This matters because /api/query
+# ignores the `graph` field (known issue 7), so tests share the default store
+# with whatever else is loaded and teardown deletes by key.
+FIXTURE_CODE_LIST = ["TST", "TS2", "TS3"]
+FIXTURE_K_LIST = ["K999001", "K999002", "K999003"]
+FIXTURE_SECTION = "999.9001"
+FIXTURE_CODES = json.dumps(FIXTURE_CODE_LIST)
+FIXTURE_KS = json.dumps(FIXTURE_K_LIST)
 
 
 @pytest.fixture
@@ -155,13 +180,16 @@ def loaded_fixture():
 
     The delete is asserted, not hoped for: if it silently failed the next test
     run would still pass while the graph filled up.
+
+    Skips at call time when no engine is reachable — see `require_engine`.
     """
+    require_engine()
     engine = fresh_engine()
     yield engine
     for query in (
         f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} DETACH DELETE p",
         f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} DETACH DELETE s",
-        'MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" DETACH DELETE r',
+        f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" DETACH DELETE r',
     ):
         engine.run(query)
     left = (
@@ -184,7 +212,6 @@ def fixture_counts(engine: Engine) -> tuple:
     )
 
 
-@pytestmark_engine
 def test_loads_and_is_idempotent(loaded_fixture):
     """The whole design rests on MERGE, because a uniqueness constraint in this
     engine does not reject a duplicate CREATE. So loading twice must not double
@@ -205,7 +232,6 @@ def test_loads_and_is_idempotent(loaded_fixture):
     assert fixture_counts(engine) == first, "loading twice changed the graph — MERGE is not holding"
 
 
-@pytestmark_engine
 def test_change_impact_query_traverses(loaded_fixture):
     """Q1 end to end: a rule reaches its clearances in two hops."""
     from etl.load_openfda import load_classifications, load_clearances
@@ -221,7 +247,6 @@ def test_change_impact_query_traverses(loaded_fixture):
     assert affected == 2, f"expected both TST clearances, got {affected}"
 
 
-@pytestmark_engine
 def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
     """The fixture deliberately contains a double-quoted device name. If the
     literal encoding is wrong this is where it shows up — either as a load
