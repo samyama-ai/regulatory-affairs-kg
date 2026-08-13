@@ -37,7 +37,6 @@ ORDER BY clearances_affected DESC
 
 **This works because the FDA stamps the regulation number onto every clearance, approval and
 classification record.** The device-to-law join is exact and government-issued, not a name match.
-`870.5150` covers **415** clearances.
 
 *Results table lands with the loader — this repo does not print numbers it has not run.*
 
@@ -133,9 +132,9 @@ nothing yet.
 ```
 etl/          # source probe (working); downloaders + loader (stubs)
 schema/       # the executable ontology
-mcp_server/   # MCP server exposing the KG
-demo/         # narrated demo (cast + gif)
-benchmarks/   # benchmark queries
+mcp_server/   # MCP server exposing the KG (scaffold — nothing to run yet)
+demo/         # narrated demo (not started)
+benchmarks/   # benchmark queries (not started)
 tests/        # pytest
 ```
 
