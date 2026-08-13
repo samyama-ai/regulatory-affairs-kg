@@ -75,28 +75,42 @@ bounded demo.
 
 ## Schema
 
-The ontology is drafted in
-[`docs/regulatory-affairs-kg-plan.md`](docs/regulatory-affairs-kg-plan.md) and lands in
-[`docs/schema.md`](docs/schema.md) and
-[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher) once source research
-confirms what the data actually supports. Both currently hold the generic placeholder ontology
-from the scaffold.
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher) is the executable
+ontology — **17 questions, 34 node labels, 39 edge types, 8 design decisions**, derived from the
+questions a regulatory-affairs professional actually asks rather than from the shape of any one
+source. Every statement executes against Samyama-Graph 1.1.0, and
+[`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) keeps it that way. The reasoning
+behind each shape is in [`docs/schema.md`](docs/schema.md).
+
+Two tiers: **loadable from public data today** — `Submission`, `ProductCode`, `Regulation`,
+`Manufacturer`, `Establishment`, `MarketedDevice`, `Recall`, `AdverseEvent`, `PredicateClaim`,
+`Standard` — and **modelled but deliberately unpopulated**: regulation text, EU market structures,
+obligations, AI governance, cybersecurity, privacy and data quality. The second tier exists so the
+ontology does not need redesigning when a source appears.
 
 ## Quick Start
+
+**Needs Python 3.10+ and Docker.**
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0 &
+docker run -d --name samyama-reg -p 8080:8080 \
+  public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 until curl -sf http://localhost:8080/api/tenants >/dev/null; do sleep 1; done
 
 python -m etl.probe_openfda          # measure the sources, live
 python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
-pytest                               # run tests
+pytest -rs                           # run tests; -rs shows anything skipped
 python -m mcp_server.server          # expose the KG over MCP (scaffold)
+
+docker rm -f samyama-reg             # when you are done
 ```
+
+`-rs` matters: the engine-backed tests skip silently without one running, and a
+green run that skipped them proves nothing.
 
 That loads **28,496 nodes and 25,310 edges** — all 7,085 device classifications plus every
 21 CFR part 870 (cardiovascular) clearance. Then:

@@ -72,8 +72,9 @@ def lit(value) -> str:
     quote. When it contains **both**, the value cannot be represented at all,
     and the inner double quotes are replaced with typographic ones. That is a
     real alteration of source data, so every instance is recorded and reported
-    rather than done silently. In the current corpus it happens twice, in
-    553,281 string values.
+    rather than done silently. In this slice it happens twice, out of the
+    456,154 values a full load passes through here — measured 2026-08-13 by
+    counting the calls, not estimated.
 
     Newlines and tabs are collapsed to spaces — not for escaping, but because a
     literal newline inside a statement breaks the parser and the engine offers
@@ -414,13 +415,16 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     print(f"loading into {args.url} (graph={args.graph})\n")
 
+    # Read the data first. Applying the schema takes a few seconds and 36
+    # writes; discovering only afterwards that ./data is empty wastes both and
+    # leaves constraints on an engine the caller may not have wanted touched.
+    classifications, class_meta = read("classification")
+    clearances, clear_meta = read("510k")
+
     if not args.skip_schema:
         applied = engine.apply_schema()
         print(f"  schema: {applied} statements applied")
-
-    classifications, class_meta = read("classification")
-    clearances, clear_meta = read("510k")
-    if args.limit:
+    if args.limit is not None:   # `--limit 0` is falsy but means zero, not "no limit"
         # Truncating both sources independently produces a smoke load whose
         # CLASSIFIED_AS edges all resolve to nothing: the first N clearances do
         # not reference the first N product codes — measured, it is zero
@@ -482,5 +486,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """main(), with engine failures reported rather than raised.
+
+    A RuntimeError here means the engine rejected a statement or went away
+    mid-load. As a traceback that reads as a bug in this script; as a message
+    it reads as what it is. Matches how etl.download_openfda reports the same
+    class of failure.
+    """
+    try:
+        return main(argv)
+    except RuntimeError as exc:
+        print(f"\nengine error: {exc}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

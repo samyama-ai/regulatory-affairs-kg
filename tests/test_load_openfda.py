@@ -18,7 +18,7 @@ import urllib.request
 
 import pytest
 
-from etl.load_openfda import SANITISED, Engine, lit, props
+from etl.load_openfda import SANITISED, Engine, lit, props, split_statements
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 
@@ -67,6 +67,58 @@ def test_newlines_and_tabs_collapse():
     """Not escaping — a literal newline breaks the parser and the engine offers
     no way to encode one."""
     assert lit("a\nb\tc\rd") == '"a b c d"'
+
+
+def test_every_control_character_collapses_not_just_the_common_three():
+    """NUL, vertical tab, form feed and DEL reach the parser too. What the
+    engine does with them is not worth finding out mid-load, and the docstring
+    claims they are handled — so assert it rather than claim it."""
+    assert lit("a\x00b\x0bc\x0cd\x7fe") == '"a b c d e"'
+    assert lit("\x01\x1f") == '"  "'
+
+
+# --------------------------------------------------------------------------
+# split_statements() — the other hand-rolled parser, also no engine needed
+# --------------------------------------------------------------------------
+
+def test_splits_on_semicolons_and_drops_comments():
+    text = "CREATE CONSTRAINT ON (n:A) ASSERT n.id IS UNIQUE;  // why\nCREATE INDEX ON :B(x);"
+    assert split_statements(text) == [
+        "CREATE CONSTRAINT ON (n:A) ASSERT n.id IS UNIQUE",
+        "CREATE INDEX ON :B(x)",
+    ]
+
+
+def test_a_url_inside_a_literal_is_not_a_comment():
+    """`//` in `https://` truncated the statement silently before this. Nothing
+    in the schema carries a URL today; this is here so adding one is not a trap."""
+    text = 'MERGE (n:S {url: "https://fda.gov/x"}) ON CREATE SET n.a = 1;'
+    assert split_statements(text) == [
+        'MERGE (n:S {url: "https://fda.gov/x"}) ON CREATE SET n.a = 1'
+    ]
+
+
+def test_a_semicolon_inside_a_literal_does_not_end_the_statement():
+    assert split_statements("MERGE (n:S {v: 'a;b'});") == ["MERGE (n:S {v: 'a;b'})"]
+
+
+def test_a_comment_marker_inside_a_literal_survives():
+    text = 'MERGE (n:S {v: "a // not a comment"});'
+    assert split_statements(text) == ['MERGE (n:S {v: "a // not a comment"})']
+
+
+def test_a_trailing_comment_does_not_swallow_what_follows():
+    """The failure this function exists for: dropping only lines that *start*
+    with // and then flattening lets one trailing comment comment out the rest
+    of the file, and the engine reports success on the shorter script."""
+    text = "CREATE INDEX ON :A(x);  // trailing\nCREATE INDEX ON :B(y);"
+    assert len(split_statements(text)) == 2
+
+
+def test_the_real_schema_still_yields_36_statements():
+    from pathlib import Path
+    schema = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
+    assert len(split_statements(schema.read_text())) == 36
 
 
 def test_none_is_null_not_the_string_none():
@@ -195,20 +247,20 @@ def loaded_fixture():
     left = (
         engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} RETURN count(p)"),
         engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} RETURN count(s)"),
-        engine.scalar('MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" RETURN count(r)'),
+        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(r)'),
     )
     assert left == (0, 0, 0), f"teardown left fixture nodes behind: {left}"
 
 
 def fixture_counts(engine: Engine) -> tuple:
     return (
-        engine.scalar('MATCH (p:ProductCode) WHERE p.product_code IN ["TST","TS2","TS3"] RETURN count(p)'),
-        engine.scalar('MATCH (r:Regulation) WHERE r.cfr_section = "999.9001" RETURN count(r)'),
-        engine.scalar('MATCH (s:Submission) WHERE s.id IN ["K999001","K999002","K999003"] RETURN count(s)'),
+        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} RETURN count(p)"),
+        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(r)'),
+        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} RETURN count(s)"),
         engine.scalar('MATCH (p:ProductCode)-[g:GOVERNED_BY]->(r:Regulation)'
-                      ' WHERE r.cfr_section = "999.9001" RETURN count(g)'),
+                      f' WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(g)'),
         engine.scalar('MATCH (s:Submission)-[c:CLASSIFIED_AS]->(:ProductCode)'
-                      ' WHERE s.id IN ["K999001","K999002","K999003"] RETURN count(c)'),
+                      f" WHERE s.id IN {FIXTURE_KS} RETURN count(c)"),
     )
 
 
@@ -242,7 +294,7 @@ def test_change_impact_query_traverses(loaded_fixture):
 
     affected = engine.scalar(
         "MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)"
-        ' WHERE r.cfr_section = "999.9001" RETURN count(s)'
+        f' WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(s)'
     )
     assert affected == 2, f"expected both TST clearances, got {affected}"
 
@@ -257,6 +309,6 @@ def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
     load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
 
     name = engine.scalar(
-        'MATCH (p:ProductCode) WHERE p.product_code = "TST" RETURN p.device_name'
+        f'MATCH (p:ProductCode) WHERE p.product_code = "{FIXTURE_CODE_LIST[0]}" RETURN p.device_name'
     )
     assert name == 'Test "quoted" device', repr(name)

@@ -28,10 +28,26 @@ badly.
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`docs/schema.md`](docs/schema.md) for labels, edges and the design decisions behind them |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
-| **Snapshot format** | `.sgsnap` |
-| **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) |
+| **Snapshot format** | `.sgsnap` — the format this engine exports; **no snapshot is published yet** |
+| **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
 | **License** | per-source (see table); raw rows not committed |
-| **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11 |
+| **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11; **graph loaded and counted 2026-08-12** |
+
+### Statement count
+
+**53,811 statements, 53,806 nodes and edges.** The five extra are the `measure()`
+queries the loader runs at the end to count what it built — three node counts and
+two edge counts. They are reads, not writes, and they are included because the
+figure is what the loader issued, not what it wrote.
+
+That run used `--skip-schema`. A run that applies the schema first issues **36 more**
+— 34 constraints and 2 indexes — for 53,847. Verified by re-running the full load on
+2026-08-13: same 28,496 nodes and 25,310 edges, 53,847 statements.
+
+Neither figure is a count of rows written. Every write is a `MERGE`, so a statement
+that matches an existing node still counts here. Node and edge totals come from
+`measure()`, which reads the graph itself, and those are the only figures reported as
+counts.
 
 ## Composition — Tier 1, measured
 
@@ -236,7 +252,7 @@ added when they are.
 | 3 | An inline property pattern combined with an aggregate ignores the filter — `MATCH (x:L {id:'B'}) RETURN count(x)` returns the whole-label count. A regression against the engine's ADR-029 | Use `WHERE`, never inline property maps, in anything that aggregates |
 | 4 | `nodes(path)` returns nodes with unresolved properties — path lengths are correct, every property is `null` | Predicate-chain queries must bind the claim to its own variable rather than reach into a named path. **Fails silently**, reading as missing data rather than a broken query |
 | 5 | **`UNWIND` does not parse at all** — not even `UNWIND [1,2,3] AS x RETURN x` — despite `CYPHER_COMPATIBILITY.md` listing it as supported. Semicolon-separated statements are also rejected, and `MERGE … SET` is a parse error (`MERGE … ON CREATE SET … ON MATCH SET` works) | No batch write form exists. The loader issues **one statement per HTTP request** — 53,811 of them in 598s, ~90/sec measured end to end. Short statements go faster in isolation, but the whole-load rate is the one that governs, and it is why a 26k-row load takes ten minutes rather than seconds |
-| 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of 553,281 in this corpus. Those are altered and **reported**, never silently changed |
+| 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of the 456,154 values this load passes through `lit()` — measured 2026-08-13 by counting the calls, not estimated. Those are altered and **reported**, never silently changed |
 | 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
 
 ## Usage
