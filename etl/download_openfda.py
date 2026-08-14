@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 import time
@@ -45,11 +46,16 @@ USER_AGENT = "regulatory-affairs-kg/0.1 (+https://github.com/samyama-ai)"
 MIN_REQUEST_INTERVAL = 60 / 240
 _last_request_at = 0.0
 
-# A CFR part is three digits (800-898 for devices). Validated because it is
-# interpolated into the openFDA `search` expression, where a value carrying
-# `+AND+` or a quote would silently change what the query means rather than
-# erroring — and a query that returns the wrong rows still writes a file.
-PART_PATTERN = re.compile(r"^\d{3}$")
+# A CFR part is three ASCII digits. Validated because it is interpolated into
+# the openFDA `search` expression, where a value carrying `+AND+` or a quote
+# would silently change what the query means rather than erroring — and a query
+# returning the wrong rows still writes a file.
+#
+# `\A...\Z` rather than `^...$`, and `[0-9]` rather than `\d`: `$` also matches
+# before a trailing newline, so `870\n` passed; and `\d` matches every Unicode
+# decimal digit, so Arabic-Indic `\u0668\u0666\u0660` and fullwidth `\uff18\uff17\uff10`
+# passed too. Neither is a CFR part.
+PART_PATTERN = re.compile(r"\A[0-9]{3}\Z")
 
 # How many times to re-page an endpoint whose integrity check fails. Unordered
 # paging on `classification` can shuffle between requests; that is transient
@@ -83,6 +89,16 @@ SORT_KEY = {"510k": "k_number.exact"}
 UNIQUE_KEY = {"classification": "product_code", "510k": "k_number"}
 
 
+def backoff(attempt: int) -> float:
+    """Exponential backoff with jitter.
+
+    Jitter rather than a bare `2 ** attempt` because a failed integrity check
+    re-pages an entire endpoint: two runs that hit the same 429 would otherwise
+    retry in lockstep and hit it again together.
+    """
+    return (2 ** attempt) * (1 + random.random() * 0.25)
+
+
 def throttle() -> None:
     """Space requests so the unauthenticated rate limit is never reached."""
     global _last_request_at
@@ -112,12 +128,12 @@ def fetch(endpoint: str, *, search: str | None = None, limit: int = 1, skip: int
             if exc.code == 404:
                 return {"meta": {"results": {"total": 0}}, "results": []}
             if exc.code in (429, 500, 502, 503) and attempt < 3:
-                time.sleep(2 ** attempt)
+                time.sleep(backoff(attempt))
                 continue
             raise
         except (urllib.error.URLError, TimeoutError):
             if attempt < 3:
-                time.sleep(2 ** attempt)
+                time.sleep(backoff(attempt))
                 continue
             raise
     raise RuntimeError(f"giving up on {url}")

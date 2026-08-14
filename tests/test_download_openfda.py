@@ -66,7 +66,14 @@ def test_a_three_digit_part_is_accepted(part):
     assert dl.PART_PATTERN.match(part)
 
 
-@pytest.mark.parametrize("part", ["870+AND+x", "87", "8700", "abc", "'", "870 ", ""])
+@pytest.mark.parametrize("part", [
+    "870+AND+x", "87", "8700", "abc", "'", "870 ", "",
+    # Both of these passed `^\d{3}$`. `$` matches before a trailing newline,
+    # and `\d` matches every Unicode decimal digit — neither is a CFR part.
+    "870\n",
+    "\u0668\u0666\u0660",          # Arabic-Indic digits
+    "\uff18\uff17\uff10",          # fullwidth digits
+])
 def test_anything_else_is_refused(part):
     """`--part` is interpolated into the openFDA search expression, where a
     value carrying `+AND+` or a quote changes what the query means rather than
@@ -91,8 +98,12 @@ def test_main_reports_a_refusal_as_exit_1(capsys):
 # fetch_all()'s two refusals, with `fetch` stubbed
 # --------------------------------------------------------------------------
 
-def stub_fetch(monkeypatch, total_count, pages):
-    """Replace `fetch` with one that reports `total_count` and serves `pages`."""
+def stub_fetch(monkeypatch, total_count, pages=()):
+    """Replace `fetch` with one reporting `total_count` and serving `pages`.
+
+    Both refusal tests below bail before any page is fetched, so they pass no
+    pages — the parameter exists for tests that do get that far.
+    """
     served = iter(pages)
 
     def fake(endpoint, *, search=None, limit=1, skip=0):
@@ -155,13 +166,119 @@ def test_a_persistent_fault_still_refuses(monkeypatch):
 def test_requests_are_spaced_under_the_rate_limit(monkeypatch):
     """openFDA allows 240 requests/minute unauthenticated. Staying under it by
     construction beats discovering it as a 429 mid-download, especially now a
-    failed integrity check re-pages a whole endpoint."""
+    failed integrity check re-pages a whole endpoint.
+
+    `_last_request_at` is a module global; monkeypatch restores it after, so
+    this test cannot bleed a timestamp into the next one.
+    """
     slept = []
     clock = [0.0]
     monkeypatch.setattr(dl.time, "sleep", lambda s: slept.append(s))
     monkeypatch.setattr(dl.time, "monotonic", lambda: clock[0])
-    dl._last_request_at = 0.0
+    monkeypatch.setattr(dl, "_last_request_at", 0.0)
     dl.throttle()
     dl.throttle()
     assert slept and slept[-1] == pytest.approx(dl.MIN_REQUEST_INTERVAL)
     assert dl.MIN_REQUEST_INTERVAL == pytest.approx(60 / 240)
+
+
+# --------------------------------------------------------------------------
+# fetch() — the 404 mapping and the retry ladder, both stubbed
+# --------------------------------------------------------------------------
+
+class FakeHTTPError(dl.urllib.error.HTTPError):
+    def __init__(self, code):
+        super().__init__("http://x", code, "boom", {}, None)
+
+
+def test_a_404_means_no_matches_not_a_failure(monkeypatch):
+    """openFDA returns 404 for an empty result set. Treating it as an error
+    would make a legitimate "nothing matched" indistinguishable from a broken
+    request; `fetch_all` is what decides an empty set is unacceptable."""
+    monkeypatch.setattr(dl, "throttle", lambda: None)
+    monkeypatch.setattr(dl.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(FakeHTTPError(404)))
+    assert dl.fetch("510k") == {"meta": {"results": {"total": 0}}, "results": []}
+
+
+@pytest.mark.parametrize("code", [429, 500, 502, 503])
+def test_transient_http_codes_are_retried(monkeypatch, code):
+    monkeypatch.setattr(dl, "throttle", lambda: None)
+    monkeypatch.setattr(dl.time, "sleep", lambda s: None)
+    attempts = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    def flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise FakeHTTPError(code)
+        return Response()
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", flaky)
+    assert dl.fetch("510k") == {"ok": True}
+    assert len(attempts) == 3
+
+
+def test_a_4xx_is_not_retried(monkeypatch):
+    """A bad request fails identically every time; four attempts only delay
+    the report."""
+    monkeypatch.setattr(dl, "throttle", lambda: None)
+    monkeypatch.setattr(dl.time, "sleep", lambda s: None)
+    attempts = []
+
+    def bad(*a, **k):
+        attempts.append(1)
+        raise FakeHTTPError(400)
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", bad)
+    with pytest.raises(dl.urllib.error.HTTPError):
+        dl.fetch("510k")
+    assert len(attempts) == 1, f"a 400 was retried {len(attempts)} times"
+
+
+def test_the_retry_ladder_gives_up_rather_than_looping(monkeypatch):
+    monkeypatch.setattr(dl, "throttle", lambda: None)
+    monkeypatch.setattr(dl.time, "sleep", lambda s: None)
+    monkeypatch.setattr(dl.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(dl.urllib.error.URLError("down")))
+    with pytest.raises(dl.urllib.error.URLError):
+        dl.fetch("510k")
+
+
+def test_backoff_grows_and_is_jittered(monkeypatch):
+    """Jitter matters because a failed integrity check re-pages a whole
+    endpoint: two runs that hit the same 429 should not march in lockstep."""
+    monkeypatch.setattr(dl, "throttle", lambda: None)
+    slept = []
+    monkeypatch.setattr(dl.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(dl.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(FakeHTTPError(503)))
+    with pytest.raises(dl.urllib.error.HTTPError):
+        dl.fetch("510k")
+    assert len(slept) == 3
+    assert slept[0] < slept[1] < slept[2], slept       # grows
+    assert not all(float(s).is_integer() for s in slept), slept   # jittered
+
+
+# --------------------------------------------------------------------------
+# write()
+# --------------------------------------------------------------------------
+
+def test_write_records_meta_alongside_the_rows(tmp_path, monkeypatch):
+    """The meta block is how a later reader knows which slice this file is —
+    which endpoint, which search, and when it was taken."""
+    monkeypatch.setattr(dl, "DATA_DIR", tmp_path)
+    rows = [{"k_number": "K1"}]
+    meta = {"endpoint": "device/510k", "search": "openfda.regulation_number:870*",
+            "retrieved_at": "2026-08-14T00:00:00+00:00", "count": 1}
+    path = dl.write("510k", rows, meta)
+
+    import json
+    payload = json.loads(path.read_text())
+    assert payload["results"] == rows
+    assert payload["meta"] == meta
+    assert path.name == "510k.json" and path.parent == tmp_path

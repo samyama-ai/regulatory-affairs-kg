@@ -21,7 +21,8 @@ from uuid import uuid4
 import pytest
 
 from etl.cypher import SANITISED, lit, merge, props, split_statements
-from etl.load_openfda import Engine, load_classifications, load_clearances
+from etl.load_openfda import (Engine, load_classifications, load_clearances,
+                              select_smoke_rows, unresolvable_joins)
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
@@ -79,6 +80,93 @@ def test_every_control_character_collapses_not_just_the_common_three():
     claims they are handled — so assert it rather than claim it."""
     assert lit("a\x00b\x0bc\x0cd\x7fe") == '"a b c d e"'
     assert lit("\x01\x1f") == '"  "'
+
+
+# --------------------------------------------------------------------------
+# unresolvable_joins() — the stale-./data guard, no engine needed
+# --------------------------------------------------------------------------
+
+def test_matching_files_have_no_unresolvable_joins():
+    klass = [{"product_code": "AAA"}, {"product_code": "BBB"}]
+    clear = [{"product_code": "AAA"}, {"product_code": "BBB"}]
+    assert unresolvable_joins(klass, clear) == []
+
+
+def test_a_stale_classification_file_is_caught():
+    """510k.json newer than classification.json. The MERGE is accepted and
+    writes nothing, so without this the run looks clean and the edge count is
+    quietly short."""
+    klass = [{"product_code": "AAA"}]
+    clear = [{"product_code": "AAA"}, {"product_code": "ZZZ"}, {"product_code": "YYY"}]
+    assert unresolvable_joins(klass, clear) == ["YYY", "ZZZ"]
+
+
+def test_clearances_with_no_product_code_are_not_counted_as_unresolvable():
+    """A blank code is a known gap already reported separately, not a mismatch
+    between the two files."""
+    assert unresolvable_joins([{"product_code": "AAA"}],
+                              [{"product_code": ""}, {"product_code": None}, {}]) == []
+
+
+def test_the_check_reads_the_input_not_the_graph():
+    """This is the whole reason it exists. Comparing statements issued against
+    `measure()` only works on an empty engine — `measure()` counts the entire
+    store, so on a populated graph the measured figure is at least the issued
+    one and a shortfall can never show. Re-running the load is the documented
+    recovery plan, which is exactly that case.
+    """
+    import ast, inspect, textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(unresolvable_joins)))
+    fn = tree.body[0]
+    if ast.get_docstring(fn):
+        fn.body = fn.body[1:]                       # prose may discuss the engine
+    body = ast.unparse(fn)
+    assert "engine" not in body.lower(), body
+    assert "run(" not in body and "scalar(" not in body, body
+
+
+# --------------------------------------------------------------------------
+# select_smoke_rows() — --limit must not exceed the cap it was given
+# --------------------------------------------------------------------------
+
+def test_smoke_selection_never_exceeds_the_limit():
+    klass = [{"product_code": f"C{i:03d}"} for i in range(50)]
+    clear = [{"product_code": f"C{i:03d}"} for i in range(50)]
+    for limit in (0, 1, 5, 40, 50, 999):
+        k, c = select_smoke_rows(klass, clear, limit)
+        assert len(k) <= limit and len(c) <= limit, (limit, len(k), len(c))
+
+
+def test_smoke_selection_caps_even_when_codes_repeat():
+    """The cap on `needed` is unreachable with real openFDA data, where a
+    product code appears once in classification.json. It exists for a file
+    where one does not — duplicate rows would otherwise push the selection past
+    the limit the caller asked for.
+    """
+    klass = [{"product_code": "C001", "device_name": f"row {i}"} for i in range(20)]
+    clear = [{"product_code": "C001"}]
+    k, c = select_smoke_rows(klass, clear, 3)
+    assert len(k) == 3, f"asked for 3, got {len(k)}"
+    assert len(c) == 1
+
+
+def test_smoke_selection_keeps_the_join_intact():
+    """Truncating both sources independently gave a smoke load whose
+    CLASSIFIED_AS edges all resolved to nothing — measured at zero overlap.
+    The clearances are chosen first so the join exists by construction."""
+    klass = [{"product_code": f"C{i:03d}"} for i in range(50)]
+    clear = [{"product_code": "C049"}, {"product_code": "C048"}]
+    k, c = select_smoke_rows(klass, clear, 2)
+    assert unresolvable_joins(k, c) == []
+
+
+def test_smoke_selection_does_not_spend_padding_on_blank_codes():
+    """`wanted` used to include "" for clearances with no product code, so
+    blank-code classifications took padding slots before being skipped."""
+    klass = [{"product_code": ""}, {"product_code": "C001"}, {"product_code": "C002"}]
+    clear = [{"product_code": "C001"}]
+    k, _ = select_smoke_rows(klass, clear, 2)
+    assert [c["product_code"] for c in k][0] == "C001"
 
 
 # --------------------------------------------------------------------------

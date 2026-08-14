@@ -39,7 +39,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from etl.cypher import SANITISED, lit, merge, props, split_statements
+from etl.cypher import SANITISED, lit, merge, split_statements
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCHEMA = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
@@ -86,7 +86,14 @@ class Engine:
                     time.sleep(2 ** attempt)
                     continue
                 raise RuntimeError(f"{exc.code} on: {query[:140]}\n{body}") from exc
-            except (urllib.error.URLError, TimeoutError) as exc:
+            # OSError and JSONDecodeError as well as URLError: urllib wraps a
+            # failure to *connect*, but not one while reading the response body.
+            # ConnectionResetError, RemoteDisconnected and IncompleteRead are
+            # OSErrors, and a proxy returning an HTML error page raises
+            # JSONDecodeError. Over 53,847 statements these are the ones that
+            # actually happen, and unhandled each leaves a half-loaded graph.
+            except (urllib.error.URLError, OSError, TimeoutError,
+                    json.JSONDecodeError) as exc:
                 if attempt < attempts - 1:
                     self.retries += 1
                     time.sleep(2 ** attempt)
@@ -284,36 +291,76 @@ def measure(engine: Engine) -> dict:
     return result
 
 
-def reconcile(issued: dict, graph: dict) -> list[str]:
-    """Print statements issued beside rows measured, and name any gap.
+def select_smoke_rows(classifications: list[dict], clearances: list[dict],
+                      limit: int) -> tuple[list[dict], list[dict]]:
+    """Rows for a `--limit` smoke load, chosen so the join actually exists.
 
-    The loader counts every statement it sends. `measure()` counts what the
-    graph actually holds. Those two agree only if nothing silently did nothing
-    — and `MATCH (a), (b) WHERE ... MERGE (a)-[..]->(b)` is accepted by the
-    engine and writes no edge when either endpoint is absent. That is exactly
-    what a stale ./data produces: 510k.json newer than classification.json,
-    clearances pointing at product codes that were never created, every
-    statement accepted, and an edge count quietly short.
+    Truncating both sources independently produced a smoke load whose
+    CLASSIFIED_AS edges all resolved to nothing — measured, the overlap between
+    the first 50 of each was zero. The MATCH then no-ops silently and the run
+    still looks fine, which is the worst kind of green.
 
-    Printing one number hides it. Printing both makes it a thing you can see.
+    So the clearances are taken first and the classifications they need follow,
+    padded back up to the limit so the classification path is exercised too.
+    Blank product codes are excluded from `wanted`: they resolve to nothing by
+    definition, and letting "" in meant blank-code classifications consumed
+    padding slots before being skipped.
+
+    Neither list ever exceeds `limit`.
     """
-    short: list[str] = []
+    clearances = clearances[:limit]
+    wanted = {code for c in clearances
+              if (code := (c.get("product_code") or "").strip())}
+    needed, rest = [], []
+    for c in classifications:
+        (needed if (c.get("product_code") or "").strip() in wanted else rest).append(c)
+    needed = needed[:limit]
+    classifications = needed + rest[: max(0, limit - len(needed))]
+    return classifications, clearances
+
+
+def unresolvable_joins(classifications: list[dict], clearances: list[dict]) -> list[str]:
+    """Clearances naming a product code no classification will create.
+
+    This is the check that actually catches a stale ./data — 510k.json newer
+    than classification.json, clearances pointing at codes that were never
+    downloaded. `MATCH (s), (p) WHERE ... MERGE (s)-[..]->(p)` is accepted by
+    the engine and writes nothing when either endpoint is absent, so the run
+    looks clean and the edge count is quietly short.
+
+    It reads the input files, not the graph, and that is the point. Comparing
+    statements issued against `measure()` only works on an empty engine:
+    `measure()` counts the whole store, so on any graph that already holds
+    data the measured figure is at least the issued one and a shortfall can
+    never show. Re-running the whole load is the documented recovery plan,
+    which is precisely the case a graph-based check is blind to.
+
+    Returns the offending product codes, deduplicated.
+    """
+    loadable = {(c.get("product_code") or "").strip()
+                for c in classifications if (c.get("product_code") or "").strip()}
+    missing = {code for c in clearances
+               if (code := (c.get("product_code") or "").strip()) and code not in loadable}
+    return sorted(missing)
+
+
+def report_counts(issued: dict, graph: dict) -> None:
+    """Statements issued beside rows measured.
+
+    `measure()` counts the whole store, so on a shared or re-run graph the
+    measured column is everything present, not everything this run wrote. Both
+    are printed because the pair is informative; neither is used to decide
+    whether the load was sound — `unresolvable_joins` does that, from the
+    input.
+    """
     for kind in ("nodes", "edges"):
         print(f"  {kind}")
-        print(f"    {'':14} {'issued':>9}  {'measured':>9}")
+        print(f"    {'':14} {'issued':>9}  {'in graph':>9}")
         for name, measured in graph[kind].items():
             sent = issued.get(name)
-            if sent is None:
-                print(f"    {name:14} {'-':>9}  {measured:>9,}")
-                continue
-            flag = ""
-            if measured < sent:
-                flag = f"   <- {sent - measured:,} short"
-                short.append(name)
-            print(f"    {name:14} {sent:>9,}  {measured:>9,}{flag}")
-        total = graph[f"total_{kind}"]
-        print(f"    {'TOTAL':14} {'':>9}  {total:>9,}")
-    return short
+            shown = f"{sent:,}" if sent is not None else "-"
+            print(f"    {name:14} {shown:>9}  {measured:>9,}")
+        print(f"    {'TOTAL':14} {'':>9}  {graph[f'total_{kind}']:>9,}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -340,25 +387,14 @@ def main(argv: list[str] | None = None) -> int:
         applied = engine.apply_schema()
         print(f"  schema: {applied} statements applied")
     if args.limit is not None:   # `--limit 0` is falsy but means zero, not "no limit"
-        # Truncating both sources independently produces a smoke load whose
-        # CLASSIFIED_AS edges all resolve to nothing: the first N clearances do
-        # not reference the first N product codes — measured, it is zero
-        # overlap at --limit 50. The MATCH then no-ops silently and the run
-        # still looks fine, which is the worst kind of green.
-        #
-        # So the clearances are chosen first and the classifications follow
-        # from them, guaranteeing the join exists. Padded back up to the limit
-        # so the classification path is still exercised on its own.
-        clearances = clearances[: args.limit]
-        wanted = {(c.get("product_code") or "").strip() for c in clearances}
-        needed = [c for c in classifications
-                  if (c.get("product_code") or "").strip() in wanted]
-        rest = [c for c in classifications
-                if (c.get("product_code") or "").strip() not in wanted]
-        classifications = needed + rest[: max(0, args.limit - len(needed))]
+        classifications, clearances = select_smoke_rows(
+            classifications, clearances, args.limit)
+        needed = unresolvable_joins(classifications, clearances)
         print(f"  --limit {args.limit}: smoke load only — {len(clearances):,} "
-              f"clearances and the {len(needed):,} product code(s) they join "
-              f"to, padded to {len(classifications):,}\n")
+              f"clearances and {len(classifications):,} product codes, chosen so "
+              f"the join exists\n")
+
+    unresolvable = unresolvable_joins(classifications, clearances)
 
     class_counts = load_classifications(engine, classifications, class_meta)
     clear_counts = load_clearances(engine, clearances, clear_meta)
@@ -370,14 +406,14 @@ def main(argv: list[str] | None = None) -> int:
     retried = f", {engine.retries} retried" if engine.retries else ""
     print(f"\n  {engine.statements:,} statements in {elapsed:.0f}s ({rate}){retried}\n")
     issued = {**class_counts, **clear_counts}
-    shortfalls = reconcile(issued, graph)
+    report_counts(issued, graph)
 
-    if shortfalls:
-        print(f"\n  {len(shortfalls)} count(s) fell short of what was issued. A "
-              f"MATCH ... MERGE whose\n  endpoints are missing is accepted by the engine "
-              f"and writes nothing, so this\n  is how a stale or mismatched ./data shows "
-              f"itself. Check that classification.json\n  and 510k.json come from the "
-              f"same download.")
+    if unresolvable:
+        print(f"\n  {len(unresolvable):,} product code(s) named by clearances are not in "
+              f"classification.json.\n  Those CLASSIFIED_AS edges cannot be written — the "
+              f"engine accepts the statement\n  and does nothing. This is what a stale "
+              f"./data looks like: check both files\n  came from the same download. "
+              f"First few: {', '.join(unresolvable[:5])}")
 
     if class_counts["no_regulation"]:
         print(f"\n  {class_counts['no_regulation']:,} product codes carry no "
@@ -397,7 +433,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps({"measured_at": stamp, "elapsed_seconds": round(elapsed, 1),
                     "statements": engine.statements, "retries": engine.retries,
                     "sanitised_values": len(SANITISED),
-                    "statements_issued": issued, "short_counts": shortfalls, **graph}, indent=2)
+                    "statements_issued": issued,
+                    "unresolvable_product_codes": unresolvable, **graph}, indent=2)
     )
     print(f"\n  report -> data/load-report.json")
     return 0
@@ -413,7 +450,8 @@ def cli(argv: list[str] | None = None) -> int:
     """
     try:
         return main(argv)
-    except RuntimeError as exc:
+    except (RuntimeError, urllib.error.URLError, OSError,
+            json.JSONDecodeError) as exc:
         print(f"\nengine error: {exc}", file=sys.stderr)
         return 2
 
