@@ -53,8 +53,9 @@ counts.
 
 **Source records, not graph nodes.** These are counts of records at the source, read live from
 the API by [`etl/probe_openfda.py`](etl/probe_openfda.py) on **2026-08-06**. Not one figure is
-hand-entered. One source record may become several nodes and edges, so node and edge figures
-follow only once a loader exists.
+hand-entered. One source record may become several nodes and edges — the 28,496 nodes and
+25,310 edges at the top of this card come from the loader measuring the graph it built, not
+from these figures.
 
 | Source | Publisher | Doc types | Source records | Format | Access | License |
 |---|---|---|---:|---|---|---|
@@ -241,7 +242,7 @@ issues.
 
 ## Known issues
 
-Found while executing the schema against **Samyama-Graph 1.1.0**. All four are engine issues, not
+Found while executing the schema against **Samyama-Graph 1.1.0**. All seven are engine issues, not
 schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
 added when they are.
 
@@ -257,20 +258,23 @@ added when they are.
 
 ## Usage
 
-Nothing to load yet. Once a snapshot exists:
-
 ```bash
 # start the engine
-docker run --rm -p 8080:8080 -p 6379:6379 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker run -d --name samyama-reg -p 8080:8080 -p 6379:6379 \
+  public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 
-# create the tenant
-curl -X POST http://localhost:8080/api/tenants \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"regulatory","name":"Regulatory Affairs KG"}'
+# fetch the source slices into ./data  (~6 min)
+python -m etl.download_openfda
 
-# apply the schema
-# (then import the .sgsnap snapshot — command lands with the first build)
+# apply the schema and build the graph  (~10 min)
+python -m etl.load_openfda
 ```
+
+That produces the 28,496 nodes and 25,310 edges reported above, and writes
+`data/load-report.json` with the measured counts.
+
+**Snapshot import lands separately.** A `.sgsnap` export would cut the ten minutes to
+seconds. This build publishes no snapshot, so the load above is the only way in.
 
 ## ⚠️ Limitations
 

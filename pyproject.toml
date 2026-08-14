@@ -19,11 +19,8 @@ include = ["etl*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    # The engine has no tenant isolation — /api/query ignores the `graph`
-    # field — so every engine-backed test writes into one shared store and
-    # tears down by key. Running them concurrently would let one test's
-    # teardown delete rows another is still asserting on. Declared serial
-    # rather than worked around, because the constraint is the engine's.
-    "xdist_group: run these together, in one worker, in order",
-]
+# No serialisation marker: engine fixture keys carry a per-run suffix, so
+# concurrent runs cannot collide and teardown cannot cross-delete. An
+# xdist_group marker was tried first and would have been misleading —
+# pytest-xdist is not a dependency, and the default --dist load ignores
+# groups anyway, so it looked like a guard while guarding nothing.

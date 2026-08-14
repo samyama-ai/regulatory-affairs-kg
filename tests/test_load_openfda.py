@@ -16,6 +16,7 @@ import json
 import os
 import urllib.request
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -182,32 +183,63 @@ def engine_available() -> bool:
 
 
 def require_engine() -> None:
-    """Skip at call time, not at import time.
+    """Skip at call time, not at import time — or fail, if asked to.
 
     `pytest.mark.skipif(not engine_available())` freezes the decision during
-    collection — start the engine while the suite is collecting and the tests
+    collection: start the engine while the suite is collecting and the tests
     still skip, reporting green for something that was never run.
-    """
-    if not engine_available():
-        pytest.skip(f"no Samyama engine at {SAMYAMA_URL}")
 
-FIXTURE_CLASSIFICATIONS = [
-    {"product_code": "TST", "device_name": 'Test "quoted" device',
-     "device_class": "2", "regulation_number": "999.9001",
-     "medical_specialty_description": "Cardiovascular"},
-    {"product_code": "TS2", "device_name": "Second device",
-     "device_class": "1", "regulation_number": "999.9001"},
-    {"product_code": "TS3", "device_name": "Unclassified", "regulation_number": ""},
-]
-FIXTURE_CLEARANCES = [
-    {"k_number": "K999001", "device_name": "Widget A", "applicant": "Acme's Devices",
-     "product_code": "TST", "decision_date": "2024-01-01",
-     "openfda": {"regulation_number": "999.9001"}},
-    {"k_number": "K999002", "device_name": "Widget B", "applicant": "Beta Corp",
-     "product_code": "TST", "decision_date": "2024-02-01", "openfda": {}},
-    {"k_number": "K999003", "device_name": "Orphan", "applicant": "Gamma",
-     "product_code": "", "openfda": {}},
-]
+    Skipping is right for a local run. It is wrong for CI, because the claim
+    these tests carry — every write is a MERGE, since a uniqueness constraint
+    in this engine does not reject a duplicate CREATE — is then proved by a
+    test nothing makes anyone run. Turn a MERGE back into a CREATE and the
+    suite still goes green.
+
+    So `SAMYAMA_REQUIRE_ENGINE=1` makes an unreachable engine a failure rather
+    than a skip. Local runs stay easy; CI cannot silently prove nothing.
+    """
+    if engine_available():
+        return
+    message = f"no Samyama engine at {SAMYAMA_URL}"
+    if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
+        pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
+    pytest.skip(message)
+
+def fixture_rows(run: str) -> tuple[list[dict], list[dict], dict]:
+    """Fixture data keyed to one run, so no two runs can touch each other.
+
+    Keys carry a random suffix rather than being fixed strings. `TST` was the
+    same shape as a real FDA product code — three letters — so a stray
+    SAMYAMA_URL pointing at a populated graph meant teardown could DETACH
+    DELETE a real node, taking its real edges with it and leaving nothing to
+    say so. Nothing requires a test product code to be three characters.
+
+    It also makes leftovers from an interrupted run harmless: the next run
+    generates different keys and cannot see them.
+    """
+    codes = [f"TST-{run}", f"TS2-{run}", f"TS3-{run}"]
+    ks = [f"K999001-{run}", f"K999002-{run}", f"K999003-{run}"]
+    section = f"999.9001-{run}"
+    classifications = [
+        {"product_code": codes[0], "device_name": 'Test "quoted" device',
+         "device_class": "2", "regulation_number": section,
+         "medical_specialty_description": "Cardiovascular"},
+        {"product_code": codes[1], "device_name": "Second device",
+         "device_class": "1", "regulation_number": section},
+        {"product_code": codes[2], "device_name": "Unclassified", "regulation_number": ""},
+    ]
+    clearances = [
+        {"k_number": ks[0], "device_name": "Widget A", "applicant": "Acme's Devices",
+         "product_code": codes[0], "decision_date": "2024-01-01",
+         "openfda": {"regulation_number": section}},
+        {"k_number": ks[1], "device_name": "Widget B", "applicant": "Beta Corp",
+         "product_code": codes[0], "decision_date": "2024-02-01", "openfda": {}},
+        {"k_number": ks[2], "device_name": "Orphan", "applicant": "Gamma",
+         "product_code": "", "openfda": {}},
+    ]
+    return classifications, clearances, {"codes": codes, "ks": ks, "section": section}
+
+
 META = {"endpoint": "test", "retrieved_at": "2026-08-12T00:00:00+00:00"}
 
 
@@ -224,110 +256,121 @@ def fresh_engine() -> Engine:
     return Engine(SAMYAMA_URL, "default")
 
 
-# One source of truth for the fixture keys. They are deliberately shaped so
-# they cannot collide with real openFDA data: FDA product codes are three
-# letters and none is "TST"/"TS2"/"TS3", K-numbers of the form K999xxx are not
-# issued, and CFR part 999 does not exist. This matters because /api/query
-# ignores the `graph` field (known issue 7), so tests share the default store
-# with whatever else is loaded and teardown deletes by key.
-FIXTURE_CODE_LIST = ["TST", "TS2", "TS3"]
-FIXTURE_K_LIST = ["K999001", "K999002", "K999003"]
-FIXTURE_SECTION = "999.9001"
-FIXTURE_CODES = json.dumps(FIXTURE_CODE_LIST)
-FIXTURE_KS = json.dumps(FIXTURE_K_LIST)
-
-
 @pytest.fixture
 def loaded_fixture():
-    """Hand back an engine, then delete everything the fixture created.
+    """An engine plus fixture data keyed to this run alone, cleaned up after.
 
     Tenants cannot isolate this — `/api/query` ignores the `graph` field — so
-    the fixture shares the default graph with whatever else is loaded. Without
-    teardown these nodes persist, which corrupts the next run's counts and, on
-    a developer's machine, quietly pollutes a real graph.
+    every test shares one store with whatever else is loaded.
 
-    The delete is asserted, not hoped for: if it silently failed the next test
-    run would still pass while the graph filled up.
+    The keys therefore carry a random per-run suffix. Fixed keys were the real
+    hazard: `SAMYAMA_URL` is read from the environment with no check, `TST` was
+    the same shape as a real FDA product code, and teardown is `DETACH DELETE`
+    — so a variable left exported from a debugging session meant the suite
+    could delete a real node and its real edges, with nothing to say so. A
+    per-run suffix makes that impossible by construction rather than by
+    convention, and also makes leftovers from an interrupted run invisible to
+    the next one instead of failing it with a message that blames MERGE.
+
+    Because the keys are unique per run, concurrent runs cannot collide either.
+
+    Teardown deletes all three labels even if one delete fails, then asserts
+    the graph is clean — a silently failed cleanup would otherwise let the next
+    run pass while the graph filled up.
 
     Skips at call time when no engine is reachable — see `require_engine`.
-
-    The three tests using this fixture are marked `xdist_group("engine")`.
-    They share one store and tear down by key, so running them concurrently
-    would let one test's teardown delete rows another is asserting on. The
-    `sanitised_log` fixture guards the same hazard for the module global; this
-    is the engine-side half of it.
     """
     require_engine()
+    # Upper-cased: the loader normalises K-numbers with .upper(), so a
+    # lower-case suffix would be stored differently from what we query for.
+    run = uuid4().hex[:8].upper()
+    classifications, clearances, keys = fixture_rows(run)
     engine = fresh_engine()
-    yield engine
+    yield engine, classifications, clearances, keys
+
+    codes, ks, section = json.dumps(keys["codes"]), json.dumps(keys["ks"]), keys["section"]
+    failures = []
     for query in (
-        f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} DETACH DELETE p",
-        f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} DETACH DELETE s",
-        f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" DETACH DELETE r',
+        f"MATCH (p:ProductCode) WHERE p.product_code IN {codes} DETACH DELETE p",
+        f"MATCH (s:Submission) WHERE s.id IN {ks} DETACH DELETE s",
+        f'MATCH (r:Regulation) WHERE r.cfr_section = "{section}" DETACH DELETE r',
     ):
-        engine.run(query)
+        try:
+            engine.run(query)
+        except Exception as exc:          # keep going; a later delete may still work
+            failures.append(f"{query[:50]} -> {exc}")
+    assert not failures, "teardown could not run: " + "; ".join(failures)
     left = (
-        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} RETURN count(p)"),
-        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} RETURN count(s)"),
-        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(r)'),
+        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {codes} RETURN count(p)"),
+        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {ks} RETURN count(s)"),
+        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{section}" RETURN count(r)'),
     )
     assert left == (0, 0, 0), f"teardown left fixture nodes behind: {left}"
 
 
-def fixture_counts(engine: Engine) -> tuple:
+def fixture_counts(engine: Engine, keys: dict) -> tuple:
+    codes, ks, section = json.dumps(keys["codes"]), json.dumps(keys["ks"]), keys["section"]
     return (
-        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {FIXTURE_CODES} RETURN count(p)"),
-        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(r)'),
-        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {FIXTURE_KS} RETURN count(s)"),
-        engine.scalar('MATCH (p:ProductCode)-[g:GOVERNED_BY]->(r:Regulation)'
-                      f' WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(g)'),
-        engine.scalar('MATCH (s:Submission)-[c:CLASSIFIED_AS]->(:ProductCode)'
-                      f" WHERE s.id IN {FIXTURE_KS} RETURN count(c)"),
+        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {codes} RETURN count(p)"),
+        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{section}" RETURN count(r)'),
+        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {ks} RETURN count(s)"),
+        engine.scalar("MATCH (p:ProductCode)-[g:GOVERNED_BY]->(r:Regulation)"
+                      f' WHERE r.cfr_section = "{section}" RETURN count(g)'),
+        engine.scalar("MATCH (s:Submission)-[c:CLASSIFIED_AS]->(:ProductCode)"
+                      f" WHERE s.id IN {ks} RETURN count(c)"),
     )
 
 
-@pytest.mark.xdist_group("engine")
 def test_loads_and_is_idempotent(loaded_fixture):
     """The whole design rests on MERGE, because a uniqueness constraint in this
     engine does not reject a duplicate CREATE. So loading twice must not double
-    anything — asserted, not assumed."""
-    engine = loaded_fixture
-    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
-    load_clearances(engine, FIXTURE_CLEARANCES, META)
-    first = fixture_counts(engine)
+    anything — and must still write, which is the half a count check misses."""
+    engine, classifications, clearances, keys = loaded_fixture
+    load_classifications(engine, classifications, META)
+    load_clearances(engine, clearances, META)
+    first = fixture_counts(engine, keys)
 
-    # 3 product codes; 1 regulation (TST and TS2 share 999.9001); 3 submissions;
-    # 2 GOVERNED_BY (TS3 has no regulation); 2 CLASSIFIED_AS (K999003 has no code).
+    # 3 product codes; 1 regulation (the first two share a section); 3 submissions;
+    # 2 GOVERNED_BY (the third code has no regulation); 2 CLASSIFIED_AS (the third
+    # clearance has no product code).
     assert first == (3, 1, 3, 2, 2), first
 
-    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
-    load_clearances(engine, FIXTURE_CLEARANCES, META)
-    assert fixture_counts(engine) == first, "loading twice changed the graph — MERGE is not holding"
+    # Change a value between the loads. Counts staying equal proves nothing was
+    # duplicated; this proves ON MATCH SET actually wrote, which is what makes
+    # "re-run the whole thing" a real recovery plan rather than a no-op.
+    changed = [dict(c) for c in classifications]
+    changed[1]["device_name"] = "Second device, revised"
+    load_classifications(engine, changed, META)
+    load_clearances(engine, clearances, META)
+
+    assert fixture_counts(engine, keys) == first, "loading twice changed the graph — MERGE is not holding"
+    name = engine.scalar(
+        f'MATCH (p:ProductCode) WHERE p.product_code = "{keys["codes"][1]}" RETURN p.device_name'
+    )
+    assert name == "Second device, revised", f"ON MATCH SET did not write: {name!r}"
 
 
-@pytest.mark.xdist_group("engine")
 def test_change_impact_query_traverses(loaded_fixture):
     """Q1 end to end: a rule reaches its clearances in two hops."""
-    engine = loaded_fixture
-    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
-    load_clearances(engine, FIXTURE_CLEARANCES, META)
+    engine, classifications, clearances, keys = loaded_fixture
+    load_classifications(engine, classifications, META)
+    load_clearances(engine, clearances, META)
 
     affected = engine.scalar(
         "MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)"
-        f' WHERE r.cfr_section = "{FIXTURE_SECTION}" RETURN count(s)'
+        f' WHERE r.cfr_section = "{keys["section"]}" RETURN count(s)'
     )
-    assert affected == 2, f"expected both TST clearances, got {affected}"
+    assert affected == 2, f"expected both clearances on the first code, got {affected}"
 
 
-@pytest.mark.xdist_group("engine")
 def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
     """The fixture deliberately contains a double-quoted device name. If the
     literal encoding is wrong this is where it shows up — either as a load
     failure or as a mangled value."""
-    engine = loaded_fixture
-    load_classifications(engine, FIXTURE_CLASSIFICATIONS, META)
+    engine, classifications, _, keys = loaded_fixture
+    load_classifications(engine, classifications, META)
 
     name = engine.scalar(
-        f'MATCH (p:ProductCode) WHERE p.product_code = "{FIXTURE_CODE_LIST[0]}" RETURN p.device_name'
+        f'MATCH (p:ProductCode) WHERE p.product_code = "{keys["codes"][0]}" RETURN p.device_name'
     )
     assert name == 'Test "quoted" device', repr(name)

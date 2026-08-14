@@ -8,10 +8,9 @@ conformity evidence, market registrations and post-market surveillance.**
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
 
-> 🚧 **Spec in progress.** Scope is decided; source research and the ontology land next.
-> Start with [`docs/scope.md`](docs/scope.md), then
-> [`docs/regulatory-affairs-kg-plan.md`](docs/regulatory-affairs-kg-plan.md) and
-> [`DATASET-CARD.md`](DATASET-CARD.md).
+> **A bounded slice is loaded and measured — 28,496 nodes, 25,310 edges.** Predicate chains
+> are designed but not loaded; the source data for them is not in the FDA's API. Counts,
+> licences and known limitations are in [`DATASET-CARD.md`](DATASET-CARD.md).
 
 ---
 

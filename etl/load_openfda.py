@@ -284,6 +284,38 @@ def measure(engine: Engine) -> dict:
     return result
 
 
+def reconcile(issued: dict, graph: dict) -> list[str]:
+    """Print statements issued beside rows measured, and name any gap.
+
+    The loader counts every statement it sends. `measure()` counts what the
+    graph actually holds. Those two agree only if nothing silently did nothing
+    — and `MATCH (a), (b) WHERE ... MERGE (a)-[..]->(b)` is accepted by the
+    engine and writes no edge when either endpoint is absent. That is exactly
+    what a stale ./data produces: 510k.json newer than classification.json,
+    clearances pointing at product codes that were never created, every
+    statement accepted, and an edge count quietly short.
+
+    Printing one number hides it. Printing both makes it a thing you can see.
+    """
+    short: list[str] = []
+    for kind in ("nodes", "edges"):
+        print(f"  {kind}")
+        print(f"    {'':14} {'issued':>9}  {'measured':>9}")
+        for name, measured in graph[kind].items():
+            sent = issued.get(name)
+            if sent is None:
+                print(f"    {name:14} {'-':>9}  {measured:>9,}")
+                continue
+            flag = ""
+            if measured < sent:
+                flag = f"   <- {sent - measured:,} short"
+                short.append(name)
+            print(f"    {name:14} {sent:>9,}  {measured:>9,}{flag}")
+        total = graph[f"total_{kind}"]
+        print(f"    {'TOTAL':14} {'':>9}  {total:>9,}")
+    return short
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--url", default=DEFAULT_URL, help="Engine base URL.")
@@ -337,14 +369,15 @@ def main(argv: list[str] | None = None) -> int:
     rate = f"{engine.statements / elapsed:.0f}/sec" if elapsed > 0 else "instant"
     retried = f", {engine.retries} retried" if engine.retries else ""
     print(f"\n  {engine.statements:,} statements in {elapsed:.0f}s ({rate}){retried}\n")
-    print("  nodes")
-    for label, count in graph["nodes"].items():
-        print(f"    {label:14} {count:>9,}")
-    print(f"    {'TOTAL':14} {graph['total_nodes']:>9,}")
-    print("  edges")
-    for edge, count in graph["edges"].items():
-        print(f"    {edge:14} {count:>9,}")
-    print(f"    {'TOTAL':14} {graph['total_edges']:>9,}")
+    issued = {**class_counts, **clear_counts}
+    shortfalls = reconcile(issued, graph)
+
+    if shortfalls:
+        print(f"\n  {len(shortfalls)} count(s) fell short of what was issued. A "
+              f"MATCH ... MERGE whose\n  endpoints are missing is accepted by the engine "
+              f"and writes nothing, so this\n  is how a stale or mismatched ./data shows "
+              f"itself. Check that classification.json\n  and 510k.json come from the "
+              f"same download.")
 
     if class_counts["no_regulation"]:
         print(f"\n  {class_counts['no_regulation']:,} product codes carry no "
@@ -363,7 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     (DATA_DIR / "load-report.json").write_text(
         json.dumps({"measured_at": stamp, "elapsed_seconds": round(elapsed, 1),
                     "statements": engine.statements, "retries": engine.retries,
-                    "sanitised_values": len(SANITISED), **graph}, indent=2)
+                    "sanitised_values": len(SANITISED),
+                    "statements_issued": issued, "short_counts": shortfalls, **graph}, indent=2)
     )
     print(f"\n  report -> data/load-report.json")
     return 0
