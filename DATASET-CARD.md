@@ -237,12 +237,12 @@ Note "Inari Medical" and "Inari Medical, Inc." arriving as separate applicants. 
 are not normalised at source — which is exactly why the schema keys on `product_code` and treats
 names as properties, never as keys.
 
-Seven engine behaviours constrain how these queries and the loader must be written; see Known
+Eight engine behaviours constrain how these queries and the loader must be written; see Known
 issues.
 
 ## Known issues
 
-Found while executing the schema against **Samyama-Graph 1.1.0**. All seven are engine issues, not
+Found while executing the schema against **Samyama-Graph 1.1.0**. All eight are engine issues, not
 schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
 added when they are.
 
@@ -255,6 +255,7 @@ added when they are.
 | 5 | **`UNWIND` does not parse at all** — not even `UNWIND [1,2,3] AS x RETURN x` — despite `CYPHER_COMPATIBILITY.md` listing it as supported. Semicolon-separated statements are also rejected, and `MERGE … SET` is a parse error (`MERGE … ON CREATE SET … ON MATCH SET` works) | No batch write form exists. The loader issues **one statement per HTTP request** — 53,811 of them in 598s, ~90/sec measured end to end. Short statements go faster in isolation, but the whole-load rate is the one that governs, and it is why a 26k-row load takes ten minutes rather than seconds |
 | 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of the 456,154 values this load passes through `lit()` — measured 2026-08-13 by counting the calls, not estimated. Those are altered and **reported**, never silently changed |
 | 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
+| 8 | **A property cannot be cleared.** `SET x = null` is accepted, reports success and leaves the previous value in place — measured 2026-08-17 in all three forms (`MATCH … SET … RETURN`, `MATCH … SET` then a separate read, and `MERGE … ON MATCH SET`). Setting an empty string behaves the same | A re-load cannot remove a value the source has dropped, so the policy is **last populated value wins**. A field the FDA later clears keeps its old value here. `tests/test_engine_limits.py` pins the behaviour and fails if a future version fixes it |
 
 ## Usage
 

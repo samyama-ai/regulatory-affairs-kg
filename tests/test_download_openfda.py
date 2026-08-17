@@ -10,6 +10,8 @@ All of these are pure functions over lists and strings, or use a stubbed
 `fetch`, so nothing here touches api.fda.gov.
 """
 
+import json
+
 import pytest
 
 from etl import download_openfda as dl
@@ -84,7 +86,7 @@ def test_anything_else_is_refused(part):
 def test_download_refuses_a_bad_part_before_any_request(monkeypatch):
     called = []
     monkeypatch.setattr(dl, "fetch_all", lambda *a, **k: called.append(1) or [])
-    with pytest.raises(ValueError, match="three-digit CFR part"):
+    with pytest.raises(ValueError, match="not three digits"):
         dl.download("870+AND+x")
     assert not called, "a request was made before the part was validated"
 
@@ -282,3 +284,33 @@ def test_write_records_meta_alongside_the_rows(tmp_path, monkeypatch):
     assert payload["results"] == rows
     assert payload["meta"] == meta
     assert path.name == "510k.json" and path.parent == tmp_path
+
+
+def test_paging_that_stops_early_is_reported():
+    """`page_through` breaks on an empty page. Without this the run keeps
+    whatever it managed to fetch and the distinct-key check passes, because
+    the keys it did get are all distinct."""
+    rows = [{"k_number": f"K{i}"} for i in range(5)]
+    problem = dl.integrity_problem("510k", rows, 100)
+    assert problem is not None and "stopped early" in problem
+
+
+def test_an_endpoint_with_no_unique_key_is_refused_not_waved_through():
+    """`if not key: return None` made the guard opt-in by dictionary entry —
+    add registrationlisting, forget the UNIQUE_KEY line, and every paging fault
+    passes verification."""
+    problem = dl.integrity_problem("registrationlisting", [{"x": 1}], 1)
+    assert problem is not None and "UNIQUE_KEY" in problem
+
+
+def test_a_non_json_response_is_not_reported_as_a_bad_filter(monkeypatch, capsys):
+    """`json.JSONDecodeError` subclasses `ValueError`, so it was caught by the
+    `refused:` branch — the message this script uses for "your filter is wrong"
+    — sending the reader to check their arguments when the API is at fault."""
+    def broken(part):
+        raise json.JSONDecodeError("Expecting value", "<html>502</html>", 0)
+
+    monkeypatch.setattr(dl, "download", broken)
+    assert dl.main(["--part", "870"]) == 2
+    err = capsys.readouterr().err
+    assert "not JSON" in err and "refused" not in err

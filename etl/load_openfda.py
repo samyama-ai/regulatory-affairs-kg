@@ -302,9 +302,10 @@ def select_smoke_rows(classifications: list[dict], clearances: list[dict],
 
     So the clearances are taken first and the classifications they need follow,
     padded back up to the limit so the classification path is exercised too.
-    Blank product codes are excluded from `wanted`: they resolve to nothing by
-    definition, and letting "" in meant blank-code classifications consumed
-    padding slots before being skipped.
+    Blank product codes are excluded on both sides. `product_code` is the merge
+    key, so a classification without one cannot be loaded at all — letting them
+    into the padding meant a smoke load asked for 40 rows and silently got
+    fewer usable ones.
 
     Neither list ever exceeds `limit`.
     """
@@ -313,7 +314,10 @@ def select_smoke_rows(classifications: list[dict], clearances: list[dict],
               if (code := (c.get("product_code") or "").strip())}
     needed, rest = [], []
     for c in classifications:
-        (needed if (c.get("product_code") or "").strip() in wanted else rest).append(c)
+        code = (c.get("product_code") or "").strip()
+        if not code:
+            continue          # keyless: cannot be loaded, and cannot ever join
+        (needed if code in wanted else rest).append(c)
     needed = needed[:limit]
     classifications = needed + rest[: max(0, limit - len(needed))]
     return classifications, clearances

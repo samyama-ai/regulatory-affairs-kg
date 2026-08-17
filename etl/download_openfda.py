@@ -89,6 +89,20 @@ SORT_KEY = {"510k": "k_number.exact"}
 UNIQUE_KEY = {"classification": "product_code", "510k": "k_number"}
 
 
+def retry_after(exc) -> float | None:
+    """Seconds the server asked us to wait, if it said so.
+
+    Only the delta-seconds form is handled; openFDA sends that. An HTTP-date
+    would need parsing and has never been observed here, so it falls through to
+    the exponential backoff rather than being half-supported.
+    """
+    value = (getattr(exc, "headers", None) or {}).get("Retry-After")
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def backoff(attempt: int) -> float:
     """Exponential backoff with jitter.
 
@@ -128,7 +142,11 @@ def fetch(endpoint: str, *, search: str | None = None, limit: int = 1, skip: int
             if exc.code == 404:
                 return {"meta": {"results": {"total": 0}}, "results": []}
             if exc.code in (429, 500, 502, 503) and attempt < 3:
-                time.sleep(backoff(attempt))
+                # A 429 usually carries Retry-After. Honour it rather than
+                # guessing: guessing short means being throttled again, and
+                # guessing long wastes the run.
+                wait = retry_after(exc) or backoff(attempt)
+                time.sleep(wait)
                 continue
             raise
         except (urllib.error.URLError, TimeoutError):
@@ -166,6 +184,7 @@ def fetch_all(endpoint: str, search: str | None = None) -> list[dict]:
             f"skip cap. Narrow the filter or use bulk downloads — do not load a "
             f"truncated set and call it complete."
         )
+    problem = f"{endpoint}: PAGING_ATTEMPTS is {PAGING_ATTEMPTS}, so no attempt was made."
     for attempt in range(1, PAGING_ATTEMPTS + 1):
         rows = page_through(endpoint, search, count)
         problem = integrity_problem(endpoint, rows, count)
@@ -204,9 +223,14 @@ def integrity_problem(endpoint: str, rows: list[dict], expected: int) -> str | N
     a renamed field would otherwise arrive disguised as a paging fault, sending
     the reader after the wrong bug.
     """
+    if len(rows) != expected:
+        return (f"{endpoint}: paged {len(rows):,} rows but the API reported "
+                f"{expected:,} — paging stopped early.")
     key = UNIQUE_KEY.get(endpoint)
     if not key:
-        return None
+        return (f"{endpoint} has no UNIQUE_KEY entry, so distinct-key verification "
+                f"cannot run. Add one before loading this endpoint — a guard that "
+                f"opts itself out by omission is not a guard.")
     missing = sum(1 for r in rows if not r.get(key))
     if missing:
         return (f"{endpoint}: {missing:,} of {len(rows):,} rows carry no `{key}`. "
@@ -230,10 +254,11 @@ def write(name: str, rows: list[dict], meta: dict) -> Path:
 def download(part: str = "870") -> None:
     if not PART_PATTERN.match(part):
         raise ValueError(
-            f"`--part {part}` is not a three-digit CFR part. This value is "
-            f"interpolated into the openFDA search expression, so anything else "
-            f"changes what the query means rather than failing — devices are "
-            f"parts 800-898."
+            f"`--part {part}` is not three digits. This value is interpolated "
+            f"into the openFDA search expression, so anything else changes what "
+            f"the query means rather than failing. Any three digits are accepted "
+            f"deliberately — device parts are 800-898, but refusing others here "
+            f"would hard-code a scope decision into a downloader."
         )
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"openFDA download  ({stamp})\n")
@@ -271,6 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         download(args.part)
+    except json.JSONDecodeError as exc:
+        # Caught BEFORE ValueError, which it subclasses. Otherwise a truncated
+        # response or a proxy's HTML error page is reported as `refused:` — the
+        # message this script uses for "your filter is wrong" — sending the
+        # reader to check their arguments when the API is the problem.
+        print(f"\nopenFDA returned something that is not JSON: {exc}", file=sys.stderr)
+        return 2
     except ValueError as exc:
         print(f"\nrefused: {exc}", file=sys.stderr)
         return 1

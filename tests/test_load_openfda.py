@@ -108,21 +108,36 @@ def test_clearances_with_no_product_code_are_not_counted_as_unresolvable():
                               [{"product_code": ""}, {"product_code": None}, {}]) == []
 
 
-def test_the_check_reads_the_input_not_the_graph():
-    """This is the whole reason it exists. Comparing statements issued against
-    `measure()` only works on an empty engine — `measure()` counts the entire
-    store, so on a populated graph the measured figure is at least the issued
-    one and a shortfall can never show. Re-running the load is the documented
-    recovery plan, which is exactly that case.
+def test_the_answer_does_not_depend_on_what_is_already_in_the_graph():
+    """The whole reason this check reads the input instead of the graph.
+
+    Comparing statements issued against `measure()` only worked on an empty
+    engine: `measure()` counts the entire store, so on a populated graph the
+    measured figure is at least the issued one and a shortfall could never
+    show — and re-running the load is the documented recovery plan, which is
+    exactly that case.
+
+    Asserted by calling it, not by reading its source: an engine that is not
+    running cannot be consulted, so a passing call proves the independence
+    directly.
     """
-    import ast, inspect, textwrap
-    tree = ast.parse(textwrap.dedent(inspect.getsource(unresolvable_joins)))
-    fn = tree.body[0]
-    if ast.get_docstring(fn):
-        fn.body = fn.body[1:]                       # prose may discuss the engine
-    body = ast.unparse(fn)
-    assert "engine" not in body.lower(), body
-    assert "run(" not in body and "scalar(" not in body, body
+    klass = [{"product_code": "AAA"}]
+    clear = [{"product_code": "AAA"}, {"product_code": "ZZZ"}]
+    expected = ["ZZZ"]
+
+    assert unresolvable_joins(klass, clear) == expected
+
+    # Same inputs, no engine reachable at all. If the function had grown a
+    # dependency on graph state this would raise rather than agree.
+    saved = os.environ.get("SAMYAMA_URL")
+    os.environ["SAMYAMA_URL"] = "http://localhost:1"
+    try:
+        assert unresolvable_joins(klass, clear) == expected
+    finally:
+        if saved is None:
+            os.environ.pop("SAMYAMA_URL", None)
+        else:
+            os.environ["SAMYAMA_URL"] = saved
 
 
 # --------------------------------------------------------------------------
@@ -165,8 +180,14 @@ def test_smoke_selection_does_not_spend_padding_on_blank_codes():
     blank-code classifications took padding slots before being skipped."""
     klass = [{"product_code": ""}, {"product_code": "C001"}, {"product_code": "C002"}]
     clear = [{"product_code": "C001"}]
-    k, _ = select_smoke_rows(klass, clear, 2)
-    assert [c["product_code"] for c in k][0] == "C001"
+    k, c = select_smoke_rows(klass, clear, 2)
+    codes = [row["product_code"] for row in k]
+
+    assert codes[0] == "C001", "the joinable code must come first"
+    assert len(k) == 2, f"asked for 2, got {len(k)}"
+    assert "" not in codes, f'a blank code took a padding slot: {codes}'
+    assert codes == ["C001", "C002"], codes
+    assert unresolvable_joins(k, c) == []
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +220,60 @@ def test_a_comment_marker_inside_a_literal_survives():
     assert split_statements(text) == ['MERGE (n:S {v: "a // not a comment"})']
 
 
+def test_booleans_are_emitted_bare():
+    """`true`, not `"true"`. Measured on 1.1.0: the engine accepts both and
+    preserves the type, and a quoted boolean cannot be filtered on."""
+    assert lit(True) == "true"
+    assert lit(False) == "false"
+
+
+def test_numbers_keep_their_type():
+    """`WHERE n.v > 40` works against a numeric property and returns 400
+    against the string "42" — so this is what makes numeric filtering possible
+    at all, not a tidiness preference."""
+    assert lit(42) == "42"
+    assert lit(-7) == "-7"
+    assert lit(3.5) == "3.5"
+    assert lit("42") == '"42"', "a string that looks numeric must stay a string"
+    assert lit("0870") == '"0870"', "leading zeros must survive — product codes"
+
+
+def test_a_block_comment_is_stripped_and_its_semicolon_ignored():
+    """1.1.0 parses `/* */`, including one containing a `;`. Splitting on that
+    semicolon would cut a statement in half — silently, since the engine would
+    just see a shorter script and report success."""
+    assert split_statements("MATCH (n) /* a ; b */ RETURN n;") == ["MATCH (n) RETURN n"]
+    assert split_statements("/* leading */ CREATE INDEX ON :A(x);") == ["CREATE INDEX ON :A(x)"]
+    assert len(split_statements("CREATE INDEX ON :A(x); /* mid ; comment */ CREATE INDEX ON :B(y);")) == 2
+
+
+def test_an_unterminated_block_comment_does_not_leak():
+    assert split_statements("CREATE INDEX ON :A(x); /* never closed") == ["CREATE INDEX ON :A(x)"]
+
+
+def test_both_merge_branches_get_the_same_assignments():
+    """Writing `null` on the ON MATCH branch to clear an emptied field was
+    tried and reverted — the engine accepts `SET x = null`, reports success and
+    leaves the value in place, which `tests/test_engine_limits.py` pins.
+
+    So the branches are identical, and "loading twice changes nothing" means
+    nothing was duplicated, not that anything was refreshed. Asserted here so
+    nobody reintroduces a null-writing branch believing it works.
+    """
+    statement = merge("T", "id", "K1", {"a": "x", "b": ""})
+    on_create = statement.split("ON CREATE SET ")[1].split(" ON MATCH SET ")[0]
+    on_match = statement.split("ON MATCH SET ")[1]
+    assert on_create == on_match, (on_create, on_match)
+    assert "null" not in statement, statement
+    assert "b" not in statement, "an empty value must not be written at all"
+
+
+def test_props_skips_empty_values_on_every_branch():
+    assert props({"a": "x", "b": ""}, "n") == 'n.a = "x"'
+    assert props({"a": "x", "b": None}, "n") == 'n.a = "x"'
+    assert props({"a": "x", "b": []}, "n") == 'n.a = "x"'
+
+
 def test_a_trailing_comment_does_not_swallow_what_follows():
     """The failure this function exists for: dropping only lines that *start*
     with // and then flattening lets one trailing comment comment out the rest
@@ -210,7 +285,7 @@ def test_a_trailing_comment_does_not_swallow_what_follows():
 def test_the_real_schema_splits_into_sound_statements():
     """Structure first, then the count — so a contributor adding an index gets
     a message rather than `assert 37 == 36`."""
-    schema = SCHEMA_PATH.read_text()
+    schema = SCHEMA_PATH.read_text(encoding="utf-8")
     statements = split_statements(schema)
     assert all(s.strip() for s in statements), "an empty statement survived the split"
     assert not [s for s in statements if "//" in s], \
@@ -232,12 +307,16 @@ def test_backslash_is_left_alone():
 
 
 def test_props_skips_empty_values_but_keeps_zero():
-    """Note `n.e = "0"` — the integer is stored as a string. That is not a slip:
-    /api/query takes no parameters, so every value is interpolated as text and
-    the engine has no way to be told otherwise. It is why queries on this graph
-    compare strings, and it is recorded in the dataset card."""
+    """Zero survives; empty string, None and empty collections do not.
+
+    Note `n.e = 0`, unquoted. Values used to be interpolated as strings without
+    exception, which did not merely lose the type: measured on 1.1.0,
+    `WHERE n.v > 40` works against a numeric property and returns 400 against
+    the string "42". Numbers and booleans are emitted bare so numeric filtering
+    is possible at all.
+    """
     out = props({"a": "x", "b": None, "c": "", "d": [], "e": 0}, "n")
-    assert out == 'n.a = "x", n.e = "0"', out
+    assert out == 'n.a = "x", n.e = 0', out
 
 
 def test_props_returns_empty_string_when_nothing_survives():
@@ -337,9 +416,9 @@ def fresh_engine() -> Engine:
     NOTE: tenants cannot be used to isolate a test. `/api/query` accepts a
     `graph` field but **ignores it** — writes sent to a named tenant land in the
     shared store and are visible from every other tenant. Measured on 1.1.0.
-    So these tests use fixture keys that cannot collide with real data
-    (product codes TST/TS2/TS3, K-numbers K9990xx, regulation 999.9001) and
-    assert on those rather than on global counts.
+    So every test asserts on its own fixture keys rather than on global counts,
+    and `fixture_rows` gives each run a distinct suffix so two runs cannot see
+    or delete each other's rows.
     """
     return Engine(SAMYAMA_URL, "default")
 
@@ -388,11 +467,14 @@ def loaded_fixture():
         except Exception as exc:          # keep going; a later delete may still work
             failures.append(f"{query[:50]} -> {exc}")
     assert not failures, "teardown could not run: " + "; ".join(failures)
-    left = (
-        engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {codes} RETURN count(p)"),
-        engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {ks} RETURN count(s)"),
-        engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{section}" RETURN count(r)'),
-    )
+    try:
+        left = (
+            engine.scalar(f"MATCH (p:ProductCode) WHERE p.product_code IN {codes} RETURN count(p)"),
+            engine.scalar(f"MATCH (s:Submission) WHERE s.id IN {ks} RETURN count(s)"),
+            engine.scalar(f'MATCH (r:Regulation) WHERE r.cfr_section = "{section}" RETURN count(r)'),
+        )
+    except Exception as exc:                 # same guard the deletes above have
+        raise AssertionError(f"could not verify teardown: {exc}") from exc
     assert left == (0, 0, 0), f"teardown left fixture nodes behind: {left}"
 
 
