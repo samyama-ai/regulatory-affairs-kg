@@ -39,6 +39,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from etl import cypher
 from etl.cypher import SANITISED, lit, merge, split_statements
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -377,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Do not apply schema/regulatory_affairs_kg.cypher first.")
     args = parser.parse_args(argv)
 
+    # A second main() in one process would otherwise report the first run's
+    # altered values as its own.
+    cypher.reset()
+
     engine = Engine(args.url, args.graph)
     started = time.time()
     print(f"loading into {args.url} (graph={args.graph})\n")
@@ -393,7 +398,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None:   # `--limit 0` is falsy but means zero, not "no limit"
         classifications, clearances = select_smoke_rows(
             classifications, clearances, args.limit)
-        needed = unresolvable_joins(classifications, clearances)
         print(f"  --limit {args.limit}: smoke load only — {len(clearances):,} "
               f"clearances and {len(classifications):,} product codes, chosen so "
               f"the join exists\n")
@@ -426,11 +430,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {clear_counts['no_product_code']:,} clearances carry no "
               f"product code — no CLASSIFIED_AS edge")
     if SANITISED:
-        print(f"\n  {len(SANITISED)} value(s) altered to be representable — the engine has no\n"
-              f"  string escaping, so a value containing BOTH quote types cannot be encoded.\n"
-              f"  Inner double quotes replaced with typographic quotes:")
-        for text in SANITISED[:5]:
-            print(f"    {text}")
+        print(f"\n  {len(SANITISED)} value(s) altered to be representable:")
+        for record in SANITISED[:5]:
+            print(f"    [{record['reason']}] {record['original'][:110]}")
 
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (DATA_DIR / "load-report.json").write_text(

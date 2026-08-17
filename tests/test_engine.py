@@ -123,3 +123,31 @@ def test_statements_are_counted_only_when_they_succeed(engine, monkeypatch):
     with pytest.raises(RuntimeError):
         engine.run("bad")
     assert engine.statements == 0, "a failed statement was counted as applied"
+
+
+def test_a_second_load_in_one_process_reports_only_its_own_altered_values(monkeypatch, tmp_path):
+    """`SANITISED` lives for the process. Without `cypher.reset()` at the top of
+    `main()`, a second load reports the first run's total as its own — and that
+    number goes into DATASET-CARD.md.
+    """
+    import etl.cypher as cypher
+    import etl.load_openfda as loader
+
+    cypher.SANITISED.append({"original": "from an earlier run", "reason": "stale"})
+
+    monkeypatch.setattr(loader, "read", lambda name: ([], {"endpoint": name}))
+    monkeypatch.setattr(loader, "unresolvable_joins", lambda a, b: [])
+    monkeypatch.setattr(loader, "load_classifications", lambda *a: {"no_regulation": 0})
+    monkeypatch.setattr(loader, "load_clearances", lambda *a: {"no_product_code": 0})
+    monkeypatch.setattr(loader, "measure", lambda e: {
+        "nodes": {}, "edges": {}, "total_nodes": 0, "total_edges": 0})
+    monkeypatch.setattr(loader, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(loader.Engine, "apply_schema", lambda self: 0)
+
+    assert loader.main(["--skip-schema", "--url", "http://localhost:9"]) == 0
+
+    import json
+    report = json.loads((tmp_path / "load-report.json").read_text())
+    assert report["sanitised_values"] == 0, (
+        "the previous run's altered values were counted as this run's"
+    )

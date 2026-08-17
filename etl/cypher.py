@@ -17,6 +17,8 @@ Everything below follows from those two.
 
 from __future__ import annotations
 
+import re
+
 # Values altered to be representable. A module global because `lit()` is called
 # from everywhere and threading a collector through every call site would be
 # worse; `reset()` exists so a process loading twice does not report the first
@@ -68,7 +70,25 @@ def lit(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
+        # NaN and the infinities have no Cypher literal. `repr()` gives `nan`,
+        # `inf`, `-inf`, which are bare identifiers the parser rejects — a 400
+        # partway through a 54,000-statement load, from a value that looked
+        # ordinary. Recorded and written as null instead, because losing one
+        # value loudly beats failing the run at row 12,000.
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            SANITISED.append({"original": repr(value), "reason": "no Cypher literal for non-finite float"})
+            return "null"
         return repr(value)
+    if isinstance(value, dict):
+        # A dict has no place as a property value, and `str()` on one produces
+        # a Python repr — {'a': 1} — which is not data. Raising beats storing
+        # it: this can only be a caller mistake, and the first row shows it
+        # rather than all 19,127.
+        raise TypeError(
+            f"dict passed to lit(): {str(value)[:80]}. Pick the fields you want "
+            f"rather than storing the block — see how `openfda` is unpacked in "
+            f"load_clearances."
+        )
     if isinstance(value, (list, tuple)):
         # openFDA harmonised fields arrive as arrays. str() on one yields a
         # Python repr — ['a', 'b'] — which is not data. Join instead, and keep
@@ -77,7 +97,12 @@ def lit(value) -> str:
     # Every control character, not just the three common ones. NUL, vertical
     # tab and form feed reach the parser otherwise, and the engine's response
     # to those is not something to discover during a 54,000-statement load.
-    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in str(value))
+    # U+2028 and U+2029 as well as the C0/C1 ranges: they are line separators,
+    # invisible in an editor, and the parser treats them as it treats a newline.
+    text = "".join(
+        " " if ch < " " or ch in ("\x7f", "\u2028", "\u2029") else ch
+        for ch in str(value)
+    )
 
     if '"' not in text:
         return f'"{text}"'
@@ -139,6 +164,23 @@ def split_statements(text: str) -> list[str]:
     return [s for s in out if s]
 
 
+IDENTIFIER = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def identifier(name: str, what: str) -> str:
+    """A label, property name or variable, checked rather than trusted.
+
+    These are interpolated unquoted — they cannot be quoted, the engine rejects
+    backticks — so a name carrying a space or a brace changes the statement's
+    shape rather than its data. Every caller today passes a hardcoded string,
+    which is exactly the kind of "safe because everyone is careful" that stops
+    being true when someone maps a source field straight through.
+    """
+    if not IDENTIFIER.match(name):
+        raise ValueError(f"{what} {name!r} is not a plain identifier")
+    return name
+
+
 def props(pairs: dict, var: str) -> str:
     """`var.key = <literal>` assignments, skipping empties.
 
@@ -158,8 +200,9 @@ def props(pairs: dict, var: str) -> str:
     will fail if a future version starts honouring it — at which point the
     ON MATCH branch should start writing nulls.
     """
+    identifier(var, "variable")
     return ", ".join(
-        f"{var}.{key} = {lit(value)}"
+        f"{var}.{identifier(key, 'property')} = {lit(value)}"
         for key, value in pairs.items()
         if value not in (None, "", [], {})
     )
@@ -174,6 +217,9 @@ def merge(label: str, key: str, key_value, attributes: dict, var: str = "n") -> 
     — "loading twice changes nothing" therefore means nothing was duplicated,
     not that anything was refreshed.
     """
+    identifier(label, "label")
+    identifier(key, "key")
+    identifier(var, "variable")
     assignments = props(attributes, var)
     statement = f"MERGE ({var}:{label} {{{key}: {lit(key_value)}}})"
     if assignments:

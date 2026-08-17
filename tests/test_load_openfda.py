@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import pytest
 
-from etl.cypher import SANITISED, lit, merge, props, split_statements
+from etl.cypher import SANITISED, identifier, lit, merge, props, split_statements
 from etl.load_openfda import (Engine, load_classifications, load_clearances,
                               select_smoke_rows, unresolvable_joins)
 
@@ -272,6 +272,57 @@ def test_props_skips_empty_values_on_every_branch():
     assert props({"a": "x", "b": ""}, "n") == 'n.a = "x"'
     assert props({"a": "x", "b": None}, "n") == 'n.a = "x"'
     assert props({"a": "x", "b": []}, "n") == 'n.a = "x"'
+
+
+def test_non_finite_floats_become_null_and_are_recorded(sanitised_log):
+    """`repr(float("nan"))` is `nan` — a bare identifier the parser rejects. As a
+    literal it would 400 partway through a 54,000-statement load, from a value
+    that looked ordinary. Losing one value loudly beats failing at row 12,000."""
+    assert lit(float("nan")) == "null"
+    assert lit(float("inf")) == "null"
+    assert lit(float("-inf")) == "null"
+    assert len(sanitised_log) == 3
+    assert all("non-finite" in r["reason"] for r in sanitised_log), sanitised_log
+
+
+def test_finite_floats_are_unaffected():
+    assert lit(0.0) == "0.0"
+    assert lit(-3.5) == "-3.5"
+
+
+def test_a_dict_value_raises_rather_than_storing_a_repr():
+    """`str({'a': 1})` is Python syntax, not data. This can only be a caller
+    mistake, so the first row shows it rather than all 19,127."""
+    with pytest.raises(TypeError, match="dict passed to lit"):
+        lit({"a": 1})
+
+
+def test_line_separators_are_swept_like_control_characters():
+    """U+2028 and U+2029 are invisible in an editor and the parser treats them
+    as it treats a newline."""
+    assert lit("a\u2028b\u2029c") == '"a b c"'
+
+
+def test_identifiers_are_checked_not_trusted():
+    """Labels, property names and variables are interpolated unquoted — they
+    cannot be quoted, since the engine rejects backticks. A name carrying a
+    space or a brace changes the statement's shape rather than its data."""
+    assert identifier("product_code", "property") == "product_code"
+    for bad in ("has space", "a-b", "1abc", "a}", "", "n) DETACH DELETE (n"):
+        with pytest.raises(ValueError, match="not a plain identifier"):
+            identifier(bad, "property")
+
+
+def test_merge_rejects_a_crafted_label_or_key():
+    with pytest.raises(ValueError, match="label"):
+        merge("T {x:1})--(y", "id", "K1", {})
+    with pytest.raises(ValueError, match="key"):
+        merge("T", "id: 1}) MATCH (m", "K1", {})
+
+
+def test_props_rejects_a_crafted_property_name():
+    with pytest.raises(ValueError, match="property"):
+        props({"a = 1, n.b": "x"}, "n")
 
 
 def test_a_trailing_comment_does_not_swallow_what_follows():
