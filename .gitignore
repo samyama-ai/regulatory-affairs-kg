@@ -3,13 +3,11 @@ __pycache__/
 *.pyc
 data/
 
-# Demo artefacts: a KG repo takes no binaries. Generated locally,
-# attached to a release.
-*.gif
+# The snapshot is a data artefact and ships on a release, not in the tree.
+# The demo .gif and .cast are committed — they are how the README shows the
+# thing working, and every sibling KG does the same.
+data/*.sgsnap
 *.mp4
-*.cast
-*.sgsnap
-*.cast
 site/
 .DS_Store
 .env

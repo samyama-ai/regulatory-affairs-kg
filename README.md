@@ -1,7 +1,9 @@
 # Medical-Device Regulatory Affairs Knowledge Graph
 
-**Device regulation as a graph — submissions, clearances, predicate chains, obligation text,
-conformity evidence, market registrations and post-market surveillance.**
+**28,496 nodes. 25,310 edges. Every FDA device classification and every cardiovascular
+clearance, joined to the law that governs each one.**
+
+![Regulatory Affairs KG demo](demo/regulatory-affairs.gif)
 
 > Part of the **Samyama** ecosystem — loaded into and queried via the graph engine at [samyama-ai/samyama-graph](https://github.com/samyama-ai/samyama-graph).
 > This repo holds the loader and source-data specifics for the KG.

@@ -41,8 +41,11 @@ unmeasured.
 
 ## Recording
 
-`.cast` and `.gif` files are **not committed** — this repo takes no binaries.
-Generate them locally and attach to a release:
+`regulatory-affairs.gif` and `.cast` **are committed** — the README shows the
+demo working, and every sibling KG does the same. The snapshot is not: it is a
+data artefact and ships on a release.
+
+Regenerate after any change that alters what the demo prints:
 
 ```bash
 asciinema rec --overwrite --cols 100 --rows 34 --idle-time-limit 2.0 \
