@@ -1,8 +1,9 @@
 # Dataset Card — Medical-Device Regulatory Affairs KG
 
-> **Status: sources measured, schema designed, not yet loaded.** Every openFDA figure below is a
-> live measurement. Node and edge counts are deliberately absent — they do not exist until a
-> loader runs, and this repo does not publish numbers it has not measured.
+> **Status: first load complete — the Q1 change-impact backbone, on real FDA data.**
+> Every figure below is a live measurement. Node and edge counts are now measured from the graph
+> itself rather than inferred from input rows, and cover a **bounded slice**: all device
+> classifications, plus 21 CFR part 870 (cardiovascular) clearances. See *Provenance*.
 
 A knowledge graph of **medical-device regulatory affairs**, combining public sources — clearances
 and approvals, device classification and the regulation governing it, manufacturers and their
@@ -21,23 +22,40 @@ badly.
 
 | | |
 |---|---|
-| **Nodes** | _not yet measured — produced by the loader_ |
-| **Edges** | _not yet measured — produced by the loader_ |
+| **Nodes** | **28,496** — measured 2026-08-12 (bounded slice, see *Provenance*) |
+| **Edges** | **25,310** — measured 2026-08-12 |
 | **Source records available** | **31,120,490** across 8 openFDA endpoints; **668,381** are the authorisation and oversight record — see below |
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
-| **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); rationale is inline |
+| **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); the rationale for each shape is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
-| **Snapshot format** | `.sgsnap` |
-| **Build hardware** | _n/a — nothing built yet_ |
+| **Snapshot format** | `.sgsnap` — the format this engine exports; **no snapshot is published yet** |
+| **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
 | **License** | per-source (see table); raw rows not committed |
-| **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11 |
+| **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11; **graph loaded and counted 2026-08-12** |
+
+### Statement count
+
+**53,811 statements, 53,806 nodes and edges.** The five extra are the `measure()`
+queries the loader runs at the end to count what it built — three node counts and
+two edge counts. They are reads, not writes, and they are included because the
+figure is what the loader issued, not what it wrote.
+
+That run used `--skip-schema`. A run that applies the schema first issues **36 more**
+— 34 constraints and 2 indexes — for 53,847. Verified by re-running the full load on
+2026-08-13: same 28,496 nodes and 25,310 edges, 53,847 statements.
+
+Neither figure is a count of rows written. Every write is a `MERGE`, so a statement
+that matches an existing node still counts here. Node and edge totals come from
+`measure()`, which reads the graph itself, and those are the only figures reported as
+counts.
 
 ## Composition — Tier 1, measured
 
 **Source records, not graph nodes.** These are counts of records at the source, read live from
 the API by [`etl/probe_openfda.py`](etl/probe_openfda.py) on **2026-08-06**. Not one figure is
-hand-entered. One source record may become several nodes and edges, so node and edge figures
-follow only once a loader exists.
+hand-entered. One source record may become several nodes and edges — the 28,496 nodes and
+25,310 edges at the top of this card come from the loader measuring the graph it built, not
+from these figures.
 
 | Source | Publisher | Doc types | Source records | Format | Access | License |
 |---|---|---|---:|---|---|---|
@@ -55,10 +73,13 @@ follow only once a loader exists.
 ### Which number to quote
 
 **81.5% of the total is MAUDE adverse-event reports**, so 31 million overstates
-graph-relevant scale. But 5,752,329 — the obvious next figure — is **88.4% UDI**
-(5,083,948), and UDI does not reliably join to clearances. That is decision §2.2,
-not a data-quality complaint: the FDA publishes no link between a clearance and
-the device as sold, so we do not assert one.
+graph-relevant scale. But the obvious next figure — 5,752,329 excluding adverse
+events — needs its own caveat: **88.4% of *that* is UDI** (5,083,948), and UDI
+does not reliably join to clearances. That is not a data-quality complaint; it is
+a deliberate schema decision, because the FDA publishes no link between a
+clearance and the device as sold.
+
+Three honest figures, not one:
 
 | Figure | What it covers |
 |---:|---|
@@ -66,7 +87,13 @@ the device as sold, so we do not assert one.
 | **5,752,329** | Excluding adverse events. **88.4% of this is UDI.** |
 | **668,381** | Clearances, approvals, classification, registrations, recalls and enforcement — **the authorisation and oversight record** |
 
-**Quote 668,381 when the question is about the regulatory backbone.**
+**Quote 668,381 when the question is about the regulatory backbone.** Quote
+5,752,329 only where UDI genuinely belongs in the answer, and say that it
+dominates. The 31M headline is true and misleading.
+
+This correction was made on 2026-08-12: the card previously called 5,752,329 the
+"regulation-relevant core", which overstated what is usable for the questions
+this graph exists to answer.
 
 ## Composition — Tier 2, identified but not yet researched
 
@@ -87,14 +114,13 @@ needs the same live-probe treatment the openFDA endpoints received before it ear
 
 ## Schema (node labels + key edge types)
 
-The executable form is
-[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), which carries the
-rationale for each shape as inline comments. Counts are not repeated here so the two cannot
-drift.
-
-The long-form ontology document — the 17 questions, the 8 design decisions with the alternatives
-considered, and "why these shapes" — is an internal design record and is not published with this
-repo.
+Full definitions, the questions each shape serves, and the design decisions behind them are in
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), which carries
+the rationale for each shape as inline comments. The long-form ontology — the 17 questions,
+the design decisions with the alternatives considered, and "why these shapes" — is an
+internal design record and is not published with this repo. The executable form is
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher). Counts are not
+repeated here so the two cannot drift.
 
 The schema is derived from **the questions the graph must answer**, written in regulatory-affairs
 language. Every node and edge exists because it turns one of them into a single traversal;
@@ -124,16 +150,50 @@ truncating a chain.
 
 ## Provenance / how it was built
 
-**Nothing is built yet.** What exists today:
+**The first load is done, and it is deliberately bounded.** What exists today:
+
+### What is loaded
+
+| | Scope | Why |
+|---|---|---|
+| **Classifications** | all **7,085** | The complete product-code → device-class → 21 CFR map. The entire device-to-law backbone. |
+| **510(k) clearances** | **19,127** — 21 CFR **part 870 (cardiovascular) only** | openFDA caps paging at `skip=25000` without a key, so the full 175,686 cannot be walked page by page. Part 870 fits under the cap and contains `870.5150`, the worked example. |
+
+| Label / edge | Count |
+|---|---:|
+| `ProductCode` | 7,085 |
+| `Regulation` | 2,284 |
+| `Submission` | 19,127 |
+| **Total nodes** | **28,496** |
+| `GOVERNED_BY` | 6,183 |
+| `CLASSIFIED_AS` | 19,127 |
+| **Total edges** | **25,310** |
+
+**902 product codes carry no regulation number** (unclassified or exempt), which is why
+`GOVERNED_BY` is 6,183 rather than 7,085. Not a load failure — the FDA does not classify them.
+
+**There is no `SUBMITTED_BY` edge, deliberately.** A 510(k) record's `openfda` block carries
+`fei_number` and `registration_number` arrays that look like a link to the applicant. They are
+harmonised **by product code**, not by applicant: `K201705` (Vetex Medical) and `K252612`
+(Penumbra) carry identical 72-entry arrays because both are product code `QEW`. Building an edge
+from that would assert every clearance was submitted by all 72 companies listing the code.
+`applicant` stays a name property; `Manufacturer` waits for `device/registrationlisting`.
+
+### Verified
+
+The change-impact query returns **415** clearances for `870.5150` — matching the count the API
+returns for the same filter, arrived at independently. Loading the same data twice leaves both
+counts unchanged.
 
 | Step | Status |
 |---|---|
 | Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
-| Schema design | ✅ 17 questions, 34 labels, 39 edges, 8 recorded decisions |
+| Schema design | ✅ [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), rationale inline |
 | Schema verified against a live engine | ✅ every statement executes; [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) |
-| Downloaders | ❌ [`etl/download_data.py`](etl/download_data.py) is a stub — nothing implemented |
-| Loaders | ❌ [`etl/loader.py`](etl/loader.py) is a stub — nothing implemented |
-| Snapshot | ❌ none |
+| Downloader | ✅ [`etl/download_openfda.py`](etl/download_openfda.py) — classifications + a scoped 510(k) slice |
+| Loader | ✅ [`etl/load_openfda.py`](etl/load_openfda.py) — MERGE-based, idempotence proven by test |
+| Predicate chains | ❌ needs PDF extraction; resolution rate unmeasured |
+| Snapshot, demo GIF | ❌ not built |
 
 Reproduce the measurements:
 
@@ -154,15 +214,38 @@ downloaders, loaders, schema and a bounded demo only.
 
 ## Query benchmark
 
-**None yet** — a benchmark without a loaded graph would be a fabrication. The query suite is
-scoped in [`benchmarks/`](benchmarks/) and lands with the first load, with honest timings
-including anything that times out.
+**Not yet a suite** — one query is verified end to end, which is not a benchmark. Timings and the
+full suite land with [`benchmarks/`](benchmarks/).
 
-Two engine behaviours already constrain how those queries must be written; see Known issues.
+Q1, change impact, against the loaded graph:
+
+```cypher
+MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)
+WHERE r.cfr_section = '870.5150'
+RETURN s.applicant AS applicant, count(s) AS clearances
+ORDER BY clearances DESC LIMIT 5
+```
+
+| applicant | clearances |
+|---|---:|
+| Penumbra, Inc. | 27 |
+| Inari Medical | 24 |
+| Inari Medical, Inc. | 23 |
+| Possis Medical, Inc. | 20 |
+| Ekos Corp. | 17 |
+
+**415 clearances in total** under that rule.
+
+Note "Inari Medical" and "Inari Medical, Inc." arriving as separate applicants. Applicant names
+are not normalised at source — which is exactly why the schema keys on `product_code` and treats
+names as properties, never as keys.
+
+Eight engine behaviours constrain how these queries and the loader must be written; see Known
+issues.
 
 ## Known issues
 
-Found while executing the schema against **Samyama-Graph 1.1.0**. All four are engine issues, not
+Found while executing the schema against **Samyama-Graph 1.1.0**. All eight are engine issues, not
 schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
 added when they are.
 
@@ -172,23 +255,30 @@ added when they are.
 | 2 | A uniqueness constraint does **not** reject a duplicate `CREATE` | **Every loader must `MERGE` on the key.** A constraint here declares the key, it does not guard the insert |
 | 3 | An inline property pattern combined with an aggregate ignores the filter — `MATCH (x:L {id:'B'}) RETURN count(x)` returns the whole-label count. A regression against the engine's ADR-029 | Use `WHERE`, never inline property maps, in anything that aggregates |
 | 4 | `nodes(path)` returns nodes with unresolved properties — path lengths are correct, every property is `null` | Predicate-chain queries must bind the claim to its own variable rather than reach into a named path. **Fails silently**, reading as missing data rather than a broken query |
+| 5 | **`UNWIND` does not parse at all** — not even `UNWIND [1,2,3] AS x RETURN x` — despite `CYPHER_COMPATIBILITY.md` listing it as supported. Semicolon-separated statements are also rejected, and `MERGE … SET` is a parse error (`MERGE … ON CREATE SET … ON MATCH SET` works) | No batch write form exists. The loader issues **one statement per HTTP request** — 53,811 of them in 598s, ~90/sec measured end to end. Short statements go faster in isolation, but the whole-load rate is the one that governs, and it is why a 26k-row load takes ten minutes rather than seconds |
+| 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of the 456,154 values this load passes through `lit()` — measured 2026-08-13 by counting the calls, not estimated. Those are altered and **reported**, never silently changed |
+| 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
+| 8 | **A property cannot be cleared.** `SET x = null` is accepted, reports success and leaves the previous value in place — measured 2026-08-17 in all three forms (`MATCH … SET … RETURN`, `MATCH … SET` then a separate read, and `MERGE … ON MATCH SET`). Setting an empty string behaves the same | A re-load cannot remove a value the source has dropped, so the policy is **last populated value wins**. A field the FDA later clears keeps its old value here. `tests/test_engine_limits.py` pins the behaviour and fails if a future version fixes it |
 
 ## Usage
 
-Nothing to load yet. Once a snapshot exists:
-
 ```bash
 # start the engine
-docker run --rm -p 8080:8080 -p 6379:6379 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+docker run -d --name samyama-reg -p 8080:8080 -p 6379:6379 \
+  public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 
-# create the tenant
-curl -X POST http://localhost:8080/api/tenants \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"regulatory","name":"Regulatory Affairs KG"}'
+# fetch the source slices into ./data  (~6 min)
+python -m etl.download_openfda
 
-# apply the schema
-# (then import the .sgsnap snapshot — command lands with the first build)
+# apply the schema and build the graph  (~10 min)
+python -m etl.load_openfda
 ```
+
+That produces the 28,496 nodes and 25,310 edges reported above, and writes
+`data/load-report.json` with the measured counts.
+
+**Snapshot import lands separately.** A `.sgsnap` export would cut the ten minutes to
+seconds. This build publishes no snapshot, so the load above is the only way in.
 
 ## ⚠️ Limitations
 
@@ -198,7 +288,8 @@ Recorded before anyone finds them, per the house standard.
   Summary PDF, and given as a free-text device name rather than a K-number — sometimes naming a
   pre-1976 device that has no clearance record at all. Predicate chains will therefore be
   **partial**, and unresolved predicates must be represented rather than silently dropped.
-  Reproduce the endpoint measurements with `python -m etl.probe_openfda`.
+  Reproduce with `python -m etl.probe_openfda`; the source research behind it is an
+  internal design record.
 - **Not every clearance publishes a summary PDF** — submitters may file a statement instead.
   The proportion is not yet quantified.
 - **Older summary PDFs are likely scans** requiring OCR; the sampled 2024 filing had a text layer.

@@ -19,3 +19,8 @@ include = ["etl*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# No serialisation marker: engine fixture keys carry a per-run suffix, so
+# concurrent runs cannot collide and teardown cannot cross-delete. An
+# xdist_group marker was tried first and would have been misleading —
+# pytest-xdist is not a dependency, and the default --dist load ignores
+# groups anyway, so it looked like a guard while guarding nothing.

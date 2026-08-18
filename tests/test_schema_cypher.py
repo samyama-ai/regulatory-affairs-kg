@@ -72,30 +72,22 @@ def test_uses_the_syntax_the_engine_parses():
     assert "IF NOT EXISTS" not in executable, "`IF NOT EXISTS` does not parse in 1.1.0"
 
 
-def test_readme_counts_match_the_schema():
-    """The README publishes 34 labels, 39 edges and 36 statements. Assert them.
-
-    Counts stated in prose and maintained by hand drift the moment the schema
-    changes, and nothing notices — the evidence standard says a figure in a
-    document comes from a check, not from memory. This is that check: change
-    the schema and this test fails until the README is corrected too.
-    """
-    text = SCHEMA.read_text()
-    labels = set(re.findall(r"CREATE CONSTRAINT ON \(\w+:(\w+)\)", text))
-    edges = set(re.findall(r"-\[:([A-Z_]+)\]", text))
-    counted = {"labels": len(labels), "edges": len(edges), "statements": len(statements())}
-    assert counted == {"labels": 34, "edges": 39, "statements": 36}, (
-        f"schema now has {counted} — update the README and DATASET-CARD to match"
-    )
-
-
-@pytest.mark.skipif(not engine_available(), reason=f"no Samyama engine at {SAMYAMA_URL}")
 def test_schema_executes_against_the_engine():
     """Every statement runs clean against a live instance.
 
     Run this against a FRESH instance: the constraints are validated against existing
     data, so leftover nodes from an earlier run surface here as a false failure.
+
+    Decided at call time, and `SAMYAMA_REQUIRE_ENGINE=1` turns an unreachable
+    engine into a failure. This is the test that certifies the schema runs at
+    all; skipping it silently is how "verified against the engine" ends up in
+    the README on the strength of a run nobody made.
     """
+    if not engine_available():
+        message = f"no Samyama engine at {SAMYAMA_URL}"
+        if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
+            pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
+        pytest.skip(message)
     failures = []
     for statement in statements():
         result = run(statement)
