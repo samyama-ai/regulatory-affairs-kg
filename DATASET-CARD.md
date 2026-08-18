@@ -240,12 +240,12 @@ Note "Inari Medical" and "Inari Medical, Inc." arriving as separate applicants. 
 are not normalised at source — which is exactly why the schema keys on `product_code` and treats
 names as properties, never as keys.
 
-Eight engine behaviours constrain how these queries and the loader must be written; see Known
+Ten engine behaviours constrain how these queries and the loader must be written; see Known
 issues.
 
 ## Known issues
 
-Found while executing the schema against **Samyama-Graph 1.1.0**. All eight are engine issues, not
+Found while executing the schema against **Samyama-Graph 1.1.0**. All ten are engine issues, not
 schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
 added when they are.
 
@@ -259,6 +259,8 @@ added when they are.
 | 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of the 456,154 values this load passes through `lit()` — measured 2026-08-13 by counting the calls, not estimated. Those are altered and **reported**, never silently changed |
 | 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
 | 8 | **A property cannot be cleared.** `SET x = null` is accepted, reports success and leaves the previous value in place — measured 2026-08-17 in all three forms (`MATCH … SET … RETURN`, `MATCH … SET` then a separate read, and `MERGE … ON MATCH SET`). Setting an empty string behaves the same | A re-load cannot remove a value the source has dropped, so the policy is **last populated value wins**. A field the FDA later clears keeps its old value here. `tests/test_engine_limits.py` pins the behaviour and fails if a future version fixes it |
+| 9 | **`UNION` returns only the first branch**, silently. `UNION ALL` behaves the same. Measured 2026-08-18 | Any query that would naturally be written as a union has to be rewritten as a single grouped `MATCH`. The demo's provenance question is written that way for this reason. One of the worse kinds: it returns a plausible number that is wrong |
+| 10 | **Running the test suite against a loaded graph destroys it.** Fixture nodes are cleaned up with `DETACH DELETE`; afterwards the node count is unchanged but equality on every **MERGE-key** property (`cfr_section`, `product_code`, `id`) returns nothing. Non-key properties still match. Reproduced on a fresh engine 2026-08-18: the headline query went 415 → 0 across one `pytest` run | This is issues 7 and 2 combining — `DETACH DELETE` does not clear property columns, and tenants cannot isolate a test because `/api/query` ignores `graph`. **Never point `SAMYAMA_URL` at a demo engine.** `demo/demo.py` now asks the graph its own headline question before showing anything and exits 1 if it comes back empty |
 
 ## Usage
 

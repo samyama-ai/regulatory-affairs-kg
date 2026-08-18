@@ -98,6 +98,27 @@ def main() -> None:
         print(f"  {RED}graph is empty{OFF} — run "
               f"`python -m etl.download_openfda && python -m etl.load_openfda`\n")
         sys.exit(1)
+
+    # A node count is not enough to know the graph is usable.
+    #
+    # Running the test suite against this engine leaves the node count intact
+    # and silently breaks equality on every MERGE-key property — `cfr_section`,
+    # `product_code`, `id`. Two engine defects combine to do it: DETACH DELETE
+    # does not clear property columns, and /api/query ignores the `graph` field
+    # so tests cannot be isolated into their own tenant. The demo then runs, the
+    # header looks right, and the questions return nothing.
+    #
+    # So the preflight asks the graph the thing the demo depends on, and refuses
+    # rather than presenting an empty answer to an audience.
+    probe, _ = query("MATCH (r:Regulation) WHERE r.cfr_section = '870.5150' "
+                     "RETURN count(r) AS found")
+    if "error" in probe or not probe["records"] or not probe["records"][0][0]:
+        print(f"\n  {RED}this graph cannot answer its own questions{OFF}")
+        print(f"{DIM}  28,496 nodes are present, but a lookup by MERGE key returns nothing.{OFF}")
+        print(f"{DIM}  Almost certainly the test suite was run against this engine — see{OFF}")
+        print(f"{DIM}  demo/README.md. Restart the engine and re-import the snapshot.{OFF}\n")
+        sys.exit(1)
+
     print(f"  {BOLD}{total_nodes:,}{OFF} nodes   {BOLD}{total_edges:,}{OFF} edges")
 
     step(

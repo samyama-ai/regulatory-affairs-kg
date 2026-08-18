@@ -20,6 +20,24 @@ python -m demo.demo
 
 It waits for **Enter** between steps, so the pacing is yours while narrating.
 
+## ⚠️ Never point the test suite at a demo engine
+
+`SAMYAMA_URL=http://localhost:8080 pytest` **destroys a loaded graph**, silently.
+
+The engine-backed tests create fixture nodes and clean up with `DETACH DELETE`.
+That leaves the node count untouched — still 28,496 — while equality on every
+MERGE-key property (`cfr_section`, `product_code`, `id`) stops matching. The
+demo then runs, the header looks right, and question 2 returns nothing.
+
+Two engine defects combine to cause it: `DETACH DELETE` does not clear property
+columns, and `/api/query` ignores the `graph` field, so tests cannot be isolated
+into their own tenant. Both are in [`../DATASET-CARD.md`](../DATASET-CARD.md).
+
+**Run tests against their own engine on a different port.** The demo now
+refuses to start on a graph in this state rather than presenting empty answers
+to an audience — it asks the graph its own headline question before showing
+anything, and exits 1 if the answer is empty.
+
 **Every number it prints comes from the graph at run time.** Nothing is
 hard-coded, so a bad load shows up in the demo rather than being papered over.
 
