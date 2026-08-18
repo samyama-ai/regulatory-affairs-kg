@@ -10,8 +10,9 @@ docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 python -m etl.download_openfda
 python -m etl.load_openfda
 
-# … or import a published snapshot (0.54 s, measured)
-curl -sLO <release-url>/regulatory-affairs.sgsnap
+# … or, once a release exists, import the snapshot (0.54 s, measured).
+# Download regulatory-affairs.sgsnap from the Releases page first —
+# no release is published yet, so this route is not available.
 curl -X POST http://localhost:8080/api/snapshot/import \
      -F "file=@regulatory-affairs.sgsnap"
 
@@ -66,7 +67,7 @@ data artefact and ships on a release.
 Regenerate after any change that alters what the demo prints:
 
 ```bash
-asciinema rec --overwrite --cols 100 --rows 34 --idle-time-limit 2.0 \
+asciinema rec --overwrite --cols 92 --rows 34 --idle-time-limit 2.0 \
   -c "python -m demo.demo" demo/regulatory-affairs.cast
 agg demo/regulatory-affairs.cast demo/regulatory-affairs.gif
 ```

@@ -74,10 +74,10 @@ def step(number: int, question: str, why: str, cypher: str, limit: int = 6) -> N
     if "error" in result:
         print(f"  {RED}{result['error'][:200]}{OFF}")
         return
-    if not result["records"]:
+    if not result.get("records"):
         print(f"  {RED}no rows — is the graph loaded?{OFF}")
         return
-    table(result["columns"], result["records"][:limit])
+    table(result.get("columns", []), result["records"][:limit])
     print(f"\n  {GREEN}{ms:.0f} ms{OFF}")
 
 

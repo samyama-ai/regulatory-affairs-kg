@@ -260,7 +260,7 @@ added when they are.
 | 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
 | 8 | **A property cannot be cleared.** `SET x = null` is accepted, reports success and leaves the previous value in place — measured 2026-08-17 in all three forms (`MATCH … SET … RETURN`, `MATCH … SET` then a separate read, and `MERGE … ON MATCH SET`). Setting an empty string behaves the same | A re-load cannot remove a value the source has dropped, so the policy is **last populated value wins**. A field the FDA later clears keeps its old value here. `tests/test_engine_limits.py` pins the behaviour and fails if a future version fixes it |
 | 9 | **`UNION` returns only the first branch**, silently. `UNION ALL` behaves the same. Measured 2026-08-18 | Any query that would naturally be written as a union has to be rewritten as a single grouped `MATCH`. The demo's provenance question is written that way for this reason. One of the worse kinds: it returns a plausible number that is wrong |
-| 10 | **Running the test suite against a loaded graph destroys it.** Fixture nodes are cleaned up with `DETACH DELETE`; afterwards the node count is unchanged but equality on every **MERGE-key** property (`cfr_section`, `product_code`, `id`) returns nothing. Non-key properties still match. Reproduced on a fresh engine 2026-08-18: the headline query went 415 → 0 across one `pytest` run | This is issues 7 and 2 combining — `DETACH DELETE` does not clear property columns, and tenants cannot isolate a test because `/api/query` ignores `graph`. **Never point `SAMYAMA_URL` at a demo engine.** `demo/demo.py` now asks the graph its own headline question before showing anything and exits 1 if it comes back empty |
+| 10 | **Running the test suite against a loaded graph destroys it.** Fixture nodes are cleaned up with `DETACH DELETE`; afterwards the node count is unchanged but equality on every **MERGE-key** property (`cfr_section`, `product_code`, `id`) returns nothing. Non-key properties still match. Reproduced on a fresh engine 2026-08-18: the headline query went 415 → 0 across one `pytest` run | The mechanism is **not measured**: issues 7 and 2 combining is the working hypothesis — `DETACH DELETE` leaving property columns behind, with tenants unable to isolate a test because `/api/query` ignores `graph` — but only the effect has been reproduced, not the cause. Worth saying plainly before this goes upstream. **Never point `SAMYAMA_URL` at a demo engine.** `demo/demo.py` now asks the graph its own headline question before showing anything and exits 1 if it comes back empty |
 
 ## Usage
 
@@ -281,12 +281,16 @@ That produces the 28,496 nodes and 25,310 edges reported above, and writes
 
 **Or import the snapshot** — measured at **0.54 seconds** against the ten-minute load:
 
+**No release exists yet**, so there is nowhere to fetch it from — the load above
+is currently the only route in. Once one is published, importing it takes 0.54
+seconds against that ten minutes:
+
 ```bash
-curl -sLO <release-url>/regulatory-affairs.sgsnap
+# download regulatory-affairs.sgsnap from the repository's Releases page
 curl -X POST http://localhost:8080/api/snapshot/import \
      -F "file=@regulatory-affairs.sgsnap"
 
-python -m demo.demo          # five questions, every number read at run time
+python -m demo.demo          # six questions, every number read at run time
 ```
 
 2.2 MB, `.sgsnap` v2, the same 28,496 nodes and 25,310 edges. **Not committed** —

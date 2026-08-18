@@ -120,7 +120,7 @@ python -m etl.probe_openfda          # measure the sources, live
 python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
 pytest -rs                           # run tests; -rs shows anything skipped
-python -m demo.demo                  # five questions, narrated
+python -m demo.demo                  # six questions, narrated
 python -m mcp_server.server          # expose the KG over MCP (scaffold)
 
 docker rm -f samyama-reg             # when you are done
@@ -177,7 +177,8 @@ pyproject.toml
 | Downloader + loader | ✅ classifications + part 870 clearances |
 | **Graph loaded** | ✅ **28,496 nodes, 25,310 edges** — a bounded slice |
 | Predicate chains | ⬜ need PDF extraction; resolution rate unmeasured |
-| **Demo + snapshot** | ✅ five questions, sub-25 ms; 2.2 MB `.sgsnap` |
+| **Demo** | ✅ six questions, sub-25 ms, every number read at run time |
+| Snapshot | ⬜ 2.2 MB `.sgsnap` produced, **not yet published** — no release exists |
 | Query suite | ⬜ not started |
 
 ## License
