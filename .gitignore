@@ -6,3 +6,5 @@ data/
 site/
 .DS_Store
 .env
+.coverage
+htmlcov/
