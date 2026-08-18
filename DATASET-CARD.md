@@ -28,7 +28,7 @@ badly.
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); the rationale for each shape is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
-| **Snapshot format** | `.sgsnap` — the format this engine exports; **no snapshot is published yet** |
+| **Snapshot format** | `.sgsnap` v2 — **2.2 MB**, imports in 0.54 s |
 | **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
 | **License** | per-source (see table); raw rows not committed |
 | **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11; **graph loaded and counted 2026-08-12** |
@@ -277,8 +277,19 @@ python -m etl.load_openfda
 That produces the 28,496 nodes and 25,310 edges reported above, and writes
 `data/load-report.json` with the measured counts.
 
-**Snapshot import lands separately.** A `.sgsnap` export would cut the ten minutes to
-seconds. This build publishes no snapshot, so the load above is the only way in.
+**Or import the snapshot** — measured at **0.54 seconds** against the ten-minute load:
+
+```bash
+curl -sLO <release-url>/regulatory-affairs.sgsnap
+curl -X POST http://localhost:8080/api/snapshot/import \
+     -F "file=@regulatory-affairs.sgsnap"
+
+python -m demo.demo          # five questions, every number read at run time
+```
+
+2.2 MB, `.sgsnap` v2, the same 28,496 nodes and 25,310 edges. **Not committed** —
+`data/` is gitignored and a KG repo takes no binaries — so it ships as a release
+asset, as do the demo's `.cast` and `.gif`.
 
 ## ⚠️ Limitations
 

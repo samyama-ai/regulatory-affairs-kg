@@ -2,6 +2,13 @@
 __pycache__/
 *.pyc
 data/
+
+# Demo artefacts: a KG repo takes no binaries. Generated locally,
+# attached to a release.
+*.gif
+*.mp4
+*.cast
+*.sgsnap
 *.cast
 site/
 .DS_Store
