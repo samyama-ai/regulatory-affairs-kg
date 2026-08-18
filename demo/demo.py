@@ -61,8 +61,24 @@ def table(columns: list[str], records: list[list]) -> None:
         print("  " + "  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
 
 
+def pause() -> None:
+    """Wait for Enter, unless there is nobody to press it.
+
+    `python -m demo.demo < /dev/null`, a CI smoke check or a piped run has no
+    stdin, and input() then raises EOFError at the first step. The demo should
+    run start to finish in that case, not die — it is also how the recording is
+    driven.
+    """
+    if not sys.stdin or not sys.stdin.isatty():
+        return
+    try:
+        input(f"\n{DIM}  [enter]{OFF}")
+    except EOFError:
+        pass
+
+
 def step(number: int, question: str, why: str, cypher: str, limit: int = 6) -> None:
-    input(f"\n{DIM}  [enter]{OFF}")
+    pause()
     print(f"\n{BOLD}{YELLOW}  {number}. {question}{OFF}")
     for line in why.splitlines():
         print(f"{DIM}  {line}{OFF}")
@@ -114,7 +130,8 @@ def main() -> None:
                      "RETURN count(r) AS found")
     if "error" in probe or not probe["records"] or not probe["records"][0][0]:
         print(f"\n  {RED}this graph cannot answer its own questions{OFF}")
-        print(f"{DIM}  28,496 nodes are present, but a lookup by MERGE key returns nothing.{OFF}")
+        print(f"{DIM}  {total_nodes:,} nodes are present, but a lookup by MERGE key "
+              f"returns nothing.{OFF}")
         print(f"{DIM}  Almost certainly the test suite was run against this engine — see{OFF}")
         print(f"{DIM}  demo/README.md. Restart the engine and re-import the snapshot.{OFF}\n")
         sys.exit(1)
@@ -189,7 +206,7 @@ def main() -> None:
         ORDER BY cfr_section LIMIT 6""",
     )
 
-    input(f"\n{DIM}  [enter]{OFF}")
+    pause()
     print(f"\n{BOLD}  What this is not, yet{OFF}")
     print(f"{DIM}  Predicate chains — the fifty-year citation network — are designed but not{OFF}")
     print(f"{DIM}  loaded. The predecessor device is not in the FDA's API; it exists only{OFF}")

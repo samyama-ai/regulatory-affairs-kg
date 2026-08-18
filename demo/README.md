@@ -77,5 +77,5 @@ agg demo/regulatory-affairs.cast demo/regulatory-affairs.gif
 `data/regulatory-affairs.sgsnap` — **2.2 MB**, 28,496 nodes, 25,310 edges,
 `.sgsnap` v2. Produced by `POST /api/snapshot/export` after a full load.
 
-Not committed either: `data/` is gitignored and raw data never enters a KG repo.
+Not committed: `data/` is gitignored and raw data never enters a KG repo.
 It belongs on a release, which is how the sibling KGs distribute theirs.
