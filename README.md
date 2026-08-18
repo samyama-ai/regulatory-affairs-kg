@@ -53,12 +53,12 @@ to, forming a public citation DAG stretching back decades.
 
 **Medical devices** — not pharmaceuticals, not financial regulation.
 **Primary:** US (FDA) and EU (MDR/IVDR). **Secondary:** ANVISA, CDSCO, Health Canada, TGA,
-MHRA/UKCA. Reasoning and open challenges in [`docs/scope.md`](docs/scope.md).
+MHRA/UKCA. The scope decision and its open challenges are an internal design record.
 
 ## Data sources
 
 Device-first, in three tiers. Full table with licences in [`DATASET-CARD.md`](DATASET-CARD.md);
-per-source detail in [`docs/sources/`](docs/sources/).
+measured live by `python -m etl.probe_openfda`.
 
 - **Tier 1** — openFDA device endpoints (510(k), PMA, classification, registration & listing,
   recalls, enforcement, MAUDE, UDI); 21 CFR Parts 800–898 via eCFR; FDA guidance and warning
@@ -79,7 +79,7 @@ ontology — **17 questions, 34 node labels, 39 edge types, 8 design decisions**
 questions a regulatory-affairs professional actually asks rather than from the shape of any one
 source. Every statement executes against Samyama-Graph 1.1.0, and
 [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) keeps it that way. The reasoning
-behind each shape is in [`docs/schema.md`](docs/schema.md).
+behind each shape is inline in the cypher.
 
 Two tiers: **loadable from public data today** — `Submission`, `ProductCode`, `Regulation`,
 `Manufacturer`, `Establishment`, `MarketedDevice`, `Recall`, `AdverseEvent`, `PredicateClaim`,
@@ -143,7 +143,6 @@ schema/       # cypher schema / ontology
 mcp_server/   # MCP server exposing the KG
 demo/         # narrated demo (cast + gif)
 benchmarks/   # benchmark queries
-docs/         # design + source notes
 tests/        # pytest
 pyproject.toml
 ```

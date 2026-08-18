@@ -26,7 +26,7 @@ badly.
 | **Edges** | **25,310** — measured 2026-08-12 |
 | **Source records available** | **31,120,490** across 8 openFDA endpoints; **668,381** are the authorisation and oversight record — see below |
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
-| **Schema** | Two tiers — see [`docs/schema.md`](docs/schema.md) for labels, edges and the design decisions behind them |
+| **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); the rationale for each shape is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
 | **Snapshot format** | `.sgsnap` — the format this engine exports; **no snapshot is published yet** |
 | **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
@@ -115,7 +115,10 @@ needs the same live-probe treatment the openFDA endpoints received before it ear
 ## Schema (node labels + key edge types)
 
 Full definitions, the questions each shape serves, and the design decisions behind them are in
-[`docs/schema.md`](docs/schema.md); the executable form is
+[`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), which carries
+the rationale for each shape as inline comments. The long-form ontology — the 17 questions,
+the design decisions with the alternatives considered, and "why these shapes" — is an
+internal design record and is not published with this repo. The executable form is
 [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher). Counts are not
 repeated here so the two cannot drift.
 
@@ -185,7 +188,7 @@ counts unchanged.
 | Step | Status |
 |---|---|
 | Source measurement | ✅ [`etl/probe_openfda.py`](etl/probe_openfda.py), run 2026-08-06 |
-| Schema design | ✅ [`docs/schema.md`](docs/schema.md) |
+| Schema design | ✅ [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher), rationale inline |
 | Schema verified against a live engine | ✅ every statement executes; [`tests/test_schema_cypher.py`](tests/test_schema_cypher.py) |
 | Downloader | ✅ [`etl/download_openfda.py`](etl/download_openfda.py) — classifications + a scoped 510(k) slice |
 | Loader | ✅ [`etl/load_openfda.py`](etl/load_openfda.py) — MERGE-based, idempotence proven by test |
@@ -285,7 +288,8 @@ Recorded before anyone finds them, per the house standard.
   Summary PDF, and given as a free-text device name rather than a K-number — sometimes naming a
   pre-1976 device that has no clearance record at all. Predicate chains will therefore be
   **partial**, and unresolved predicates must be represented rather than silently dropped.
-  See [`docs/sources/openfda-devices.md`](docs/sources/openfda-devices.md).
+  Reproduce with `python -m etl.probe_openfda`; the source research behind it is an
+  internal design record.
 - **Not every clearance publishes a summary PDF** — submitters may file a statement instead.
   The proportion is not yet quantified.
 - **Older summary PDFs are likely scans** requiring OCR; the sampled 2024 filing had a text layer.
