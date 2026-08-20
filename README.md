@@ -1,7 +1,9 @@
 # Medical-Device Regulatory Affairs Knowledge Graph
 
-**Device regulation as a graph — submissions, clearances, predicate chains, obligation text,
-conformity evidence, market registrations and post-market surveillance.**
+**28,496 nodes. 25,310 edges. Every FDA device classification and every cardiovascular
+clearance, joined to the law that governs each one.**
+
+![Regulatory Affairs KG demo](demo/regulatory-affairs.gif)
 
 > Part of the **Samyama** ecosystem — loaded into and queried via the graph engine at [samyama-ai/samyama-graph](https://github.com/samyama-ai/samyama-graph).
 > This repo holds the loader and source-data specifics for the KG.
@@ -28,16 +30,31 @@ systems that don't reference each other.
 As a graph it is a single traversal.
 
 ```cypher
--- planned signature query: change blast-radius
-MATCH (c:Clause)<-[:GOVERNED_BY]-(d:Device)-[:REGISTERED_IN]->(j:Jurisdiction)
-WHERE c.id = $changed_clause
-RETURN j.name AS market, count(DISTINCT d) AS devices_affected
-ORDER BY devices_affected DESC
+// Change blast-radius: a 21 CFR section is amended — who is affected?
+MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission)
+WHERE r.cfr_section = '870.5150'
+RETURN s.applicant AS applicant, count(s) AS clearances
+ORDER BY clearances DESC LIMIT 5
 ```
 
-This is the same shape as the change-impact query in
-[`bank-model-risk-kg`](https://github.com/samyama-ai/bank-model-risk-kg) — *"if this data source
-changes, which regulatory submissions are exposed?"* — applied to device regulation.
+| applicant | clearances |
+|---|---:|
+| Penumbra, Inc. | 27 |
+| Inari Medical | 24 |
+| Inari Medical, Inc. | 23 |
+| Possis Medical, Inc. | 20 |
+| Ekos Corp. | 17 |
+
+**415 clearances** sit under that one rule — and the FDA's own API returns the same number for
+the same filter, arrived at independently.
+
+This works because **the FDA stamps the regulation number onto every clearance, approval and
+classification record.** The device-to-law join is exact and government-issued, not a name match.
+
+Note *Inari Medical* and *Inari Medical, Inc.* arriving separately — **applicant names are not
+normalised at source and this graph does not normalise them either.** That is why the schema keys
+on `product_code` and treats names as properties, never as keys. Entity resolution over applicants
+is not modelled.
 
 ## Why a graph
 
@@ -103,6 +120,7 @@ python -m etl.probe_openfda          # measure the sources, live
 python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
 pytest -rs                           # run tests; -rs shows anything skipped
+python -m demo.demo                  # six questions, narrated
 python -m mcp_server.server          # expose the KG over MCP (scaffold)
 
 docker rm -f samyama-reg             # when you are done
@@ -159,7 +177,9 @@ pyproject.toml
 | Downloader + loader | ✅ classifications + part 870 clearances |
 | **Graph loaded** | ✅ **28,496 nodes, 25,310 edges** — a bounded slice |
 | Predicate chains | ⬜ need PDF extraction; resolution rate unmeasured |
-| Query suite, snapshot, demo | ⬜ not started |
+| **Demo** | ✅ six questions, sub-25 ms, every number read at run time |
+| Snapshot | ⬜ 2.2 MB `.sgsnap` produced, **not yet published** — no release exists |
+| Query suite | ⬜ not started |
 
 ## License
 

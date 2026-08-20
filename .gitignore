@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 data/
-*.cast
+
+# The snapshot is a data artefact and ships on a release, not in the tree.
+# The demo .gif and .cast are committed — they are how the README shows the
+# thing working, and every sibling KG does the same.
+*.mp4
 site/
 .DS_Store
 .env

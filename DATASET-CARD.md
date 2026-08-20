@@ -28,7 +28,7 @@ badly.
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); the rationale for each shape is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
-| **Snapshot format** | `.sgsnap` — the format this engine exports; **no snapshot is published yet** |
+| **Snapshot format** | `.sgsnap` v2 — **2.2 MB**, imports in 0.54 s; **not yet published** |
 | **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
 | **License** | per-source (see table); raw rows not committed |
 | **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11; **graph loaded and counted 2026-08-12** |
@@ -240,12 +240,12 @@ Note "Inari Medical" and "Inari Medical, Inc." arriving as separate applicants. 
 are not normalised at source — which is exactly why the schema keys on `product_code` and treats
 names as properties, never as keys.
 
-Eight engine behaviours constrain how these queries and the loader must be written; see Known
+Ten engine behaviours constrain how these queries and the loader must be written; see Known
 issues.
 
 ## Known issues
 
-Found while executing the schema against **Samyama-Graph 1.1.0**. All eight are engine issues, not
+Found while executing the schema against **Samyama-Graph 1.1.0**. All ten are engine issues, not
 schema issues. **None is yet filed upstream** — they are recorded here so the numbering can be
 added when they are.
 
@@ -259,6 +259,8 @@ added when they are.
 | 6 | **No string escaping inside literals.** `\"` and `\'` are parse errors; `\n`, `\t`, `\\` pass through as literal backslash sequences rather than being decoded. A literal's own delimiter cannot appear inside it, and `/api/query` accepts **no parameters** | Quote style is chosen per value. A value containing *both* quote types cannot be represented at all — 2 of the 456,154 values this load passes through `lit()` — measured 2026-08-13 by counting the calls, not estimated. Those are altered and **reported**, never silently changed |
 | 7 | **`/api/query` ignores the `graph` field.** Writes sent to a named tenant land in the shared store and are visible from every other tenant | Tenants cannot isolate a test or a dataset through this API. The loader tests use fixture keys that cannot collide with real data instead |
 | 8 | **A property cannot be cleared.** `SET x = null` is accepted, reports success and leaves the previous value in place — measured 2026-08-17 in all three forms (`MATCH … SET … RETURN`, `MATCH … SET` then a separate read, and `MERGE … ON MATCH SET`). Setting an empty string behaves the same | A re-load cannot remove a value the source has dropped, so the policy is **last populated value wins**. A field the FDA later clears keeps its old value here. `tests/test_engine_limits.py` pins the behaviour and fails if a future version fixes it |
+| 9 | **`UNION` returns only the first branch**, silently. `UNION ALL` behaves the same. Measured 2026-08-18 | Any query that would naturally be written as a union has to be rewritten as a single grouped `MATCH`. The demo's provenance question is written that way for this reason. One of the worse kinds: it returns a plausible number that is wrong |
+| 10 | **Running the test suite against a loaded graph destroys it.** Fixture nodes are cleaned up with `DETACH DELETE`; afterwards the node count is unchanged but equality on every **MERGE-key** property (`cfr_section`, `product_code`, `id`) returns nothing. Non-key properties still match. Reproduced on a fresh engine 2026-08-18: the headline query went 415 → 0 across one `pytest` run | The mechanism is **not measured**: issues 7 and 2 combining is the working hypothesis — `DETACH DELETE` leaving property columns behind, with tenants unable to isolate a test because `/api/query` ignores `graph` — but only the effect has been reproduced, not the cause. Worth saying plainly before this goes upstream. **Never point `SAMYAMA_URL` at a demo engine.** `demo/demo.py` now asks the graph its own headline question before showing anything and exits 1 if it comes back empty |
 
 ## Usage
 
@@ -277,8 +279,22 @@ python -m etl.load_openfda
 That produces the 28,496 nodes and 25,310 edges reported above, and writes
 `data/load-report.json` with the measured counts.
 
-**Snapshot import lands separately.** A `.sgsnap` export would cut the ten minutes to
-seconds. This build publishes no snapshot, so the load above is the only way in.
+**No release exists yet**, so there is nowhere to fetch it from — the load above
+is currently the only route in. Once one is published, importing it takes 0.54
+seconds against that ten minutes:
+
+```bash
+# download regulatory-affairs.sgsnap from the repository's Releases page
+curl -X POST http://localhost:8080/api/snapshot/import \
+     -F "file=@regulatory-affairs.sgsnap"
+
+python -m demo.demo          # six questions, every number read at run time
+```
+
+2.2 MB, `.sgsnap` v2, the same 28,496 nodes and 25,310 edges. **Not committed** —
+`data/` is gitignored and a KG repo takes no binaries — so it ships as a release
+asset. The demo's `.cast` and `.gif` are committed —
+they are how the README shows the demo working.
 
 ## ⚠️ Limitations
 
