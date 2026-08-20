@@ -121,7 +121,7 @@ python -m etl.download_openfda       # fetch into data/  (~6 min)
 python -m etl.load_openfda           # build the graph   (~10 min)
 pytest -rs                           # run tests; -rs shows anything skipped
 python -m demo.demo                  # six questions, narrated
-python -m mcp_server.server          # expose the KG over MCP (scaffold)
+python -m mcp_server.server          # expose the KG over MCP — 8 tools
 
 docker rm -f samyama-reg             # when you are done
 ```
@@ -158,7 +158,7 @@ is not modelled.
 ```
 etl/          # openFDA probe, downloader and loader
 schema/       # cypher schema / ontology
-mcp_server/   # MCP server exposing the KG
+mcp_server/   # MCP server — queries.py holds the traversals, server.py the wiring
 demo/         # narrated demo (cast + gif)
 benchmarks/   # benchmark queries
 tests/        # pytest
