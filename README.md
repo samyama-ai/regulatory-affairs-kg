@@ -43,7 +43,7 @@ changes, which regulatory submissions are exposed?"* — applied to device regul
 
 Device regulation has unusually strong identifiers — 510(k) K-numbers, PMA numbers, FDA product
 codes, UDI-DIs, EUDAMED identifiers. Joins across sources are **exact rather than name-based**,
-which makes federation reliable instead of approximate.
+which makes cross-source merging reliable instead of approximate.
 
 It also contains a structure that is natively a graph and poorly served elsewhere: **510(k)
 predicate chains.** Each clearance cites the predicate device it claims substantial equivalence
