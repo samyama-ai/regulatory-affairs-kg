@@ -4,15 +4,30 @@ Nine queries against the loaded graph, with measured timings.
 [`QUERY_RESULTS.md`](QUERY_RESULTS.md) is written by the runner — nothing on it
 is typed in.
 
+**Load from source.** There is no published snapshot — `README.md` and
+`DATASET-CARD.md` both say so, and `data/` is not in the tree, so the import
+below cannot be the primary path:
+
 ```bash
 docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-curl -X POST http://localhost:8080/api/snapshot/import \
-     -F "file=@data/regulatory-affairs.sgsnap"
+python -m etl.download_openfda      # about 4 minutes
+python -m etl.load_openfda          # about 16 minutes
 python -m benchmarks.run_queries
 ```
 
-Without a snapshot, load from source first — `python -m etl.download_openfda`
-then `python -m etl.load_openfda`, about 16 minutes.
+Once a snapshot exists — a release is not cut yet — importing one is faster
+than reloading:
+
+```bash
+curl -X POST http://localhost:8080/api/snapshot/import \
+     -F "file=@data/regulatory-affairs.sgsnap"
+```
+
+**Run it against a fresh instance.** The index comparison below CREATES the
+indexes it measures, so a second run on the same engine compares an indexed
+lookup against an indexed lookup and reports a scan time that is not a scan.
+The runner refuses that rather than printing it, but a fresh engine is the
+only way to get the figures.
 
 ## What it found
 
@@ -20,14 +35,16 @@ The timings are the point of running it, but the most useful thing it measured
 was not a timing. **A uniqueness constraint in 1.1.0 declares the key and does
 not index it**, so every point lookup on a MERGE key scans the whole label:
 
-| Key | Nodes | Scan | Indexed | |
-|---|---:|---:|---:|---:|
-| `Submission.id` | 19,127 | 160.1 ms | 1.3 ms | **124×** |
-| `ProductCode.product_code` | 7,085 | 65.6 ms | 1.2 ms | **55×** |
-| `Regulation.cfr_section` | 2,284 | 19.7 ms | 1.2 ms | **16×** |
+The speedup tracks label size, which is what a scan looks like — the figures
+are in [`QUERY_RESULTS.md`](QUERY_RESULTS.md#a-uniqueness-constraint-does-not-create-an-index),
+written by the runner.
 
-The speedup tracks label size, which is what a scan looks like. Raised as **#21**;
-the demo, the MCP tools and the loader are all paying it.
+**They are not repeated here on purpose.** A measured number copied into a
+second file drifts the moment the first is regenerated, and this table had
+already drifted — it quoted a run whose scan times were a third lower than the
+current ones. One source for a figure, and it is the one a program writes.
+
+Raised as **#21**; the demo, the MCP tools and the loader are all paying it.
 
 ## It refuses to run against the wrong graph
 

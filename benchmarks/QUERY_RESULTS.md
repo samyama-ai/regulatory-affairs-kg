@@ -1,11 +1,18 @@
 # Regulatory Affairs KG — query results
 
-> Measured 2026-08-20T06:17:40+00:00 · Samyama-Graph 1.1.0 · local Docker
+> Measured 2026-08-21T07:50:00+00:00 · Samyama-Graph 1.1.0 · local Docker
 > 28,496 nodes, 25,310 edges
 
+**Timings are client round-trip, not engine execution time.** The clock
+starts before the HTTP request and stops after the JSON is decoded, so
+connection setup, transfer and parsing are all inside the figure. It is
+what a caller waits for, which is why it is the number reported — but it
+is not what the engine spends inside the query.
+
 Every figure on this page is written by `python -m benchmarks.run_queries`.
-Nothing is typed in — the same standard `etl/probe_openfda.py` holds the
-dataset card to.
+Nothing is typed in. That is the same standard the dataset card is held
+to: every figure in [`../DATASET-CARD.md`](../DATASET-CARD.md) is written
+by `etl/probe_openfda.py` rather than being remembered.
 
 ---
 
@@ -25,7 +32,7 @@ dataset card to.
 | **Total edges** | **25,310** |
 
 This is a **bounded slice**, not the full 31,120,490 openFDA records —
-see `DATASET-CARD.md` for what was loaded and why.
+see [`../DATASET-CARD.md`](../DATASET-CARD.md) for what was loaded and why.
 
 ---
 
@@ -39,7 +46,7 @@ The question this graph exists for. Two hops, because `regulation_number` is on 
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN count(s) AS clearances
 ```
 
-**6.9 ms** median of 5 (min 4.7, max 8.8)
+**11.8 ms** median of 5 (min 9.6, max 12.7)
 
 | clearances |
 |---|
@@ -56,7 +63,7 @@ The same traversal, returning rows rather than a count.
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN s.id AS clearance, s.applicant AS applicant, s.decision_date AS decided ORDER BY s.decision_date DESC LIMIT 5
 ```
 
-**9.4 ms** median of 5 (min 7.6, max 9.9)
+**13.9 ms** median of 5 (min 13.2, max 14.2)
 
 | clearance | applicant | decided |
 |---|---|---|
@@ -77,7 +84,7 @@ An aggregation across the whole graph. Answers which rules carry the most cleara
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) RETURN r.cfr_section AS cfr_section, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**22.1 ms** median of 5 (min 21.3, max 29.5)
+**29.3 ms** median of 5 (min 28.6, max 29.6)
 
 | cfr_section | clearances |
 |---|---|
@@ -103,11 +110,11 @@ One hop from the join hub. `product_code` is on every openFDA endpoint; device *
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.product_code = 'DXY' RETURN p.definition AS device_category, p.device_class AS class, r.cfr_section AS cfr_section
 ```
 
-**28.5 ms** median of 5 (min 24.1, max 37.3)
+**48.0 ms** median of 5 (min 34.2, max 71.5)
 
 | device_category | class | cfr_section |
 |---|---|---|
-| None | 3 | 870.3610 |
+|  | 3 | 870.3610 |
 
 
 ## 5. Law to device categories
@@ -120,15 +127,15 @@ The reverse of the above, and the first half of a change-impact answer.
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE r.cfr_section = '870.5150' RETURN p.product_code AS product_code, p.definition AS category LIMIT 10
 ```
 
-**1.9 ms** median of 5 (min 1.9, max 2.4)
+**5.0 ms** median of 5 (min 4.7, max 5.4)
 
 | product_code | category |
 |---|---|
-| MMX | None |
+| MMX |  |
 | QEX | To mechanically disrupt thrombus and/or debris prior to removal from the coronary vasculature through aspiration. |
 | QEZ | To remove thrombus from the peripheral and/or coronary vasculature through aspiration. |
 | QEW | To mechanically disrupt thrombus and/or debris prior to removal from the peripheral vasculature through aspiration. |
-| DXE | None |
+| DXE |  |
 | QEY | To mechanically disrupt thrombus and/or debris in the peripheral vasculature. |
 
 
@@ -142,7 +149,7 @@ A point lookup through two hops — the query an inspector runs.
 MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE s.id = 'K233820' RETURN s.device_name AS device, p.product_code AS product_code, r.cfr_section AS cfr_section
 ```
 
-**81.2 ms** median of 5 (min 79.8, max 82.5)
+**135.4 ms** median of 5 (min 108.9, max 146.2)
 
 | device | product_code | cfr_section |
 |---|---|---|
@@ -159,7 +166,7 @@ A grouping over 19,127 submissions. Note this is *decided* clearances — openFD
 MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL RETURN s.advisory_committee AS committee, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**14.2 ms** median of 5 (min 13.8, max 14.4)
+**28.1 ms** median of 5 (min 26.9, max 33.3)
 
 | committee | clearances |
 |---|---|
@@ -174,10 +181,10 @@ MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL RETURN s.advisory_co
 A filtered scan with a join — the population a reviewer starts from.
 
 ```cypher
-MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.device_class = '3' RETURN count(p) AS class_three_categories
+MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.device_class = '3' RETURN count(DISTINCT p) AS class_three_categories
 ```
 
-**11.0 ms** median of 5 (min 9.1, max 11.5)
+**18.6 ms** median of 5 (min 16.4, max 21.6)
 
 | class_three_categories |
 |---|
@@ -194,7 +201,7 @@ The question a reviewer asks before trusting any answer above. Every node carrie
 MATCH (n) WHERE n.source IS NOT NULL RETURN n.source AS source, count(n) AS nodes ORDER BY nodes DESC
 ```
 
-**21.4 ms** median of 5 (min 20.3, max 23.9)
+**60.9 ms** median of 5 (min 28.0, max 65.0)
 
 | source | nodes |
 |---|---|
@@ -210,11 +217,11 @@ The single most useful thing this suite measured. `schema/regulatory_affairs_kg.
 declares `ASSERT s.id IS UNIQUE` for each MERGE key — and a point lookup on
 one of those keys still scans the whole label.
 
-| Key | Nodes | Scan | Indexed | |
+| Key | Nodes | Scan | Indexed | Speedup |
 |---|---:|---:|---:|---:|
-| `Submission.id` | 19,127 | 160.1 ms | 1.3 ms | **124×** |
-| `ProductCode.product_code` | 7,085 | 65.6 ms | 1.2 ms | **55×** |
-| `Regulation.cfr_section` | 2,284 | 19.7 ms | 1.2 ms | **16×** |
+| `Submission.id` | 19,127 | 234.9 ms | 1.8 ms | **133×** |
+| `ProductCode.product_code` | 7,085 | 97.3 ms | 1.7 ms | **57×** |
+| `Regulation.cfr_section` | 2,284 | 29.2 ms | 1.7 ms | **17×** |
 
 The speedup tracks label size almost exactly, which is what a full scan
 looks like. The schema already records that a constraint in 1.1.0 declares
@@ -229,7 +236,7 @@ end of this run, so nothing above benefits from them.
 
 ## What the timings mean
 
-The slowest query here is **clearance to rule** at 81.2 ms. Every query is a median of 5 runs,
+The slowest query here is **clearance to rule** at 135.4 ms. Every query is a median of 5 runs,
 because a single reading on a warm cache is not a measurement.
 
 These are **not** a comparison against another database. Nothing here has

@@ -9,7 +9,7 @@ Or load from source first with `etl.download_openfda` + `etl.load_openfda` if no
 snapshot is to hand.
 
 Every figure in QUERY_RESULTS.md is written by this script. Nothing is typed in,
-which is the same standard `etl/probe_openfda.py` holds the dataset card to.
+which is the standard `etl/probe_openfda.py` already holds the dataset card to.
 
 WHY IT REFUSES TO RUN AGAINST THE WRONG GRAPH
 ---------------------------------------------
@@ -126,9 +126,15 @@ QUERIES: list[dict] = [
         "name": "High-risk device categories",
         "question": "Which device categories take the Class III route?",
         "why": "A filtered scan with a join — the population a reviewer starts from.",
+        # `count(DISTINCT p)`, not `count(p)`. The bare form counts PATTERN
+        # MATCHES, so a product code governed by two regulations would be
+        # counted twice and the figure would overstate the population. Measured
+        # on this graph: at most one regulation per product code, so both forms
+        # give 145 today — the distinct form is correct by construction rather
+        # than by a property of the current data.
         "cypher": ("MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
                    "WHERE p.device_class = '3' "
-                   "RETURN count(p) AS class_three_categories"),
+                   "RETURN count(DISTINCT p) AS class_three_categories"),
     },
     {
         "name": "Provenance",
@@ -192,12 +198,31 @@ def shape(url: str) -> dict:
         payload, _ = run(f"MATCH ()-[r:{edge}]->() RETURN count(r) AS c", url)
         by_edge[edge] = rows_of(payload)[0]["c"]
 
+    # Enforced, not merely declared. The same rationale as the label guard
+    # above: an edge type this graph is made of returning zero means the wrong
+    # snapshot is loaded, and every traversal figure below would describe a
+    # graph nobody asked about. It was written down and never checked.
+    empty = sorted(edge for edge, count in by_edge.items() if not count)
+    if empty:
+        raise SystemExit(
+            f"the engine holds no {', '.join(empty)} edges, which this graph is "
+            f"made of. The traversal timings below would be measuring nothing. "
+            f"Import the snapshot into a fresh instance.")
+
     return {"nodes": nodes, "edges": edge_total,
             "by_label": counts, "by_edge": by_edge}
 
 
 def measure(query: dict, url: str) -> dict:
-    """Median of REPEATS, so one warm-cache reading is not reported as a figure."""
+    """Median of REPEATS, so one warm-cache reading is not reported as a figure.
+
+    **This is round-trip time, not query time.** The clock starts before the
+    HTTP request and stops after the JSON is decoded, so it includes connection
+    setup, transfer and parsing. That is the honest thing to measure from a
+    client — it is what a caller waits for — but it is not the engine's
+    internal execution time, and the page says so rather than letting a reader
+    take these as query latency.
+    """
     timings, payload = [], None
     for _ in range(REPEATS):
         payload, elapsed = run(query["cypher"], url)
@@ -220,18 +245,49 @@ KEYS = [
 ]
 
 
+def existing_indexes(url: str) -> set[tuple[str, str]]:
+    """`(label, property)` for every index the engine already holds.
+
+    `SHOW INDEXES` parses in 1.1.0 — measured — and it is what makes the
+    refusal below possible.
+    """
+    payload, _ = run("SHOW INDEXES", url)
+    return {(row.get("label"), row.get("property")) for row in rows_of(payload)}
+
+
 def index_effect(url: str, sizes: dict) -> list[dict]:
     """What a uniqueness constraint does not do.
+
+    **This mutates the graph, and that makes it run-once.** It creates the
+    indexes it measures, so on a SECOND run against the same instance the
+    "before" figure is already an indexed lookup — and the table would report
+    a scan time that is not a scan, with a speedup near 1, as though the index
+    did nothing. Nothing about the output would say so.
+
+    So the state is checked first and the measurement is REFUSED rather than
+    reported wrongly. Re-running is a fresh instance, or nothing.
 
     Run last, because it creates indexes and every timing above should be the
     unindexed figure — which is what the shipped schema currently produces.
     """
+    already = existing_indexes(url)
+    clashes = sorted(f"{label}.{prop}" for label, prop, _ in KEYS
+                     if (label, prop) in already)
+    if clashes:
+        return [{"key": key, "nodes": sizes.get(key.split(".")[0], 0),
+                 "scan_ms": None, "indexed_ms": None, "speedup": None,
+                 "note": "already indexed — unindexed figure not measurable here"}
+                for key in clashes]
+
     def median(cypher: str) -> float:
         return statistics.median(run(cypher, url)[1] for _ in range(REPEATS))
 
     out = []
     before = {label: median(cypher) for label, _, cypher in KEYS}
     for label, prop, _ in KEYS:
+        # Re-creating an existing index is accepted by 1.1.0 rather than being
+        # an error — measured — so this cannot abort a run on its own. The
+        # guard above exists for the FIGURES, not for the statement.
         run(f"CREATE INDEX ON :{label}({prop})", url)
     for label, prop, cypher in KEYS:
         after = median(cypher)
@@ -241,18 +297,35 @@ def index_effect(url: str, sizes: dict) -> list[dict]:
     return out
 
 
+def cell(value) -> str:
+    """One markdown cell. A `|` in a value splits the row into extra columns
+    and the table renders wrong from that line down — device names and
+    definitions are free text from openFDA, so this is not hypothetical."""
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
 def table(rows: list[dict]) -> str:
     if not rows:
         return "_no rows_\n"
-    columns = list(rows[0])
+    # Every key across every row, in first-seen order. Taking the columns from
+    # `rows[0]` alone silently DROPPED any field the first row happened not to
+    # carry — and a row missing a key is exactly what a query with an optional
+    # field returns.
+    columns: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
     out = ["| " + " | ".join(columns) + " |",
            "|" + "|".join("---" for _ in columns) + "|"]
     for row in rows:
-        out.append("| " + " | ".join(str(row.get(c, "")) for c in columns) + " |")
+        out.append("| " + " | ".join(cell(row.get(c)) for c in columns) + " |")
     return "\n".join(out) + "\n"
 
 
-def report(url: str) -> str:
+def report(url: str, with_index_effect: bool = True) -> str:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stats = shape(url)
     measured = [measure(q, url) for q in QUERIES]
@@ -263,9 +336,16 @@ def report(url: str) -> str:
         f"> Measured {stamp} · {ENGINE} · local Docker",
         f"> {stats['nodes']:,} nodes, {stats['edges']:,} edges",
         "",
+        "**Timings are client round-trip, not engine execution time.** The clock",
+        "starts before the HTTP request and stops after the JSON is decoded, so",
+        "connection setup, transfer and parsing are all inside the figure. It is",
+        "what a caller waits for, which is why it is the number reported — but it",
+        "is not what the engine spends inside the query.",
+        "",
         "Every figure on this page is written by `python -m benchmarks.run_queries`.",
-        "Nothing is typed in — the same standard `etl/probe_openfda.py` holds the",
-        "dataset card to.",
+        "Nothing is typed in. That is the same standard the dataset card is held",
+        "to: every figure in [`../DATASET-CARD.md`](../DATASET-CARD.md) is written",
+        "by `etl/probe_openfda.py` rather than being remembered.",
         "",
         "---",
         "",
@@ -282,7 +362,8 @@ def report(url: str) -> str:
         lines.append(f"| `{edge}` | {count:,} |")
     lines += [f"| **Total edges** | **{stats['edges']:,}** |", "",
               "This is a **bounded slice**, not the full 31,120,490 openFDA records —",
-              "see `DATASET-CARD.md` for what was loaded and why.", "", "---", ""]
+              "see [`../DATASET-CARD.md`](../DATASET-CARD.md) for what was loaded "
+              "and why.", "", "---", ""]
 
     for i, q in enumerate(measured, 1):
         lines += [
@@ -303,7 +384,6 @@ def report(url: str) -> str:
             "",
         ]
 
-    keys = index_effect(url, stats["by_label"])
     lines += [
         "---",
         "",
@@ -313,12 +393,28 @@ def report(url: str) -> str:
         "declares `ASSERT s.id IS UNIQUE` for each MERGE key — and a point lookup on",
         "one of those keys still scans the whole label.",
         "",
-        "| Key | Nodes | Scan | Indexed | |",
-        "|---|---:|---:|---:|---:|",
     ]
-    for k in keys:
-        lines.append(f"| `{k['key']}` | {k['nodes']:,} | {k['scan_ms']:.1f} ms | "
-                     f"{k['indexed_ms']:.1f} ms | **{k['speedup']:.0f}×** |")
+    if not with_index_effect:
+        lines += [
+            "_Not measured on this run._ The comparison CREATES INDEXES, so it "
+            "changes the instance it runs against — and `--print` reads as a dry "
+            "run. Pass `--with-index-effect` to measure it, against an instance "
+            "you are willing to change.",
+            "",
+        ]
+    else:
+        keys = index_effect(url, stats["by_label"])
+        lines += [
+            "| Key | Nodes | Scan | Indexed | Speedup |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for k in keys:
+            if k.get("scan_ms") is None:
+                lines.append(f"| `{k['key']}` | {k['nodes']:,} | — | — | "
+                             f"_{k['note']}_ |")
+            else:
+                lines.append(f"| `{k['key']}` | {k['nodes']:,} | {k['scan_ms']:.1f} ms | "
+                             f"{k['indexed_ms']:.1f} ms | **{k['speedup']:.0f}×** |")
     lines += [
         "",
         "The speedup tracks label size almost exactly, which is what a full scan",
@@ -358,16 +454,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--url", default=URL, help=f"Engine URL (default {URL}).")
     parser.add_argument("--print", action="store_true",
-                        help="Write to stdout instead of the results file.")
+                        help="Write to stdout instead of the results file. Also "
+                             "skips the index measurement, which writes to the "
+                             "graph — see --with-index-effect.")
+    parser.add_argument("--with-index-effect", action="store_true",
+                        help="Run the index comparison even with --print. It "
+                             "CREATES INDEXES, so the instance is changed and "
+                             "the unindexed figures cannot be measured again.")
     args = parser.parse_args(argv)
 
-    text = report(args.url.rstrip("/"))
+    # `--print` reads as a dry run, so it does not mutate the graph unless the
+    # index measurement is asked for explicitly.
+    text = report(args.url.rstrip("/"),
+                  with_index_effect=args.with_index_effect or not args.print)
     if args.print:
         print(text)
     else:
         OUT.write_text(text)
-        print(f"wrote {OUT.relative_to(Path.cwd())} "
-              f"({len(text.splitlines())} lines)", file=sys.stderr)
+        # `relative_to` RAISES when the path is not under the cwd, so running
+        # this from anywhere outside the repo crashed after the file was
+        # already written — the work done, the report an exception.
+        try:
+            where = OUT.relative_to(Path.cwd())
+        except ValueError:
+            where = OUT
+        print(f"wrote {where} ({len(text.splitlines())} lines)", file=sys.stderr)
     return 0
 
 

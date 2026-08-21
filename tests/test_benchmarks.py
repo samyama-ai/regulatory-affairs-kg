@@ -9,6 +9,7 @@ counts from it would have produced a page wrong in a way nobody could see.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -18,10 +19,17 @@ from benchmarks import run_queries as bench
 def serve(monkeypatch, answers: dict):
     """Answer each query by substring match on the cypher."""
     class R:
-        def __init__(self, payload): self._p = payload
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return json.dumps(self._p).encode()
+        def __init__(self, payload):
+            self._p = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(self._p).encode()
 
     def urlopen(request, *a, **k):
         cypher = json.loads(request.data)["query"]
@@ -32,13 +40,26 @@ def serve(monkeypatch, answers: dict):
     monkeypatch.setattr(bench.urllib.request, "urlopen", urlopen)
 
 
-def counts(total, submissions=0, product_codes=0, regulations=0, edges=0):
+def counts(total, submissions=0, product_codes=0, regulations=0, edges=0,
+           classified_as=None, governed_by=None):
+    """Answers for every count `shape()` asks for.
+
+    The per-edge-type answers default to a share of `edges` rather than to
+    zero: `EXPECTED_EDGES` is enforced now, so a fixture that leaves them at
+    zero is a fixture describing a graph with no edges — which `shape()`
+    should and does refuse.
+    """
+    each = edges // 2 if edges else 0
     return {
         "(n:Submission)": {"columns": ["c"], "records": [[submissions]]},
         "(n:ProductCode)": {"columns": ["c"], "records": [[product_codes]]},
         "(n:Regulation)": {"columns": ["c"], "records": [[regulations]]},
         "MATCH (n) RETURN count(n)": {"columns": ["c"], "records": [[total]]},
         "MATCH ()-[r]->() RETURN": {"columns": ["c"], "records": [[edges]]},
+        "[r:CLASSIFIED_AS]": {"columns": ["c"],
+                              "records": [[classified_as if classified_as is not None else each]]},
+        "[r:GOVERNED_BY]": {"columns": ["c"],
+                            "records": [[governed_by if governed_by is not None else each]]},
     }
 
 
@@ -60,11 +81,27 @@ def test_a_clean_graph_is_accepted(monkeypatch):
     assert got["by_label"]["Submission"] == 19_127
 
 
-def test_an_empty_engine_is_refused(monkeypatch):
-    """A snapshot that failed to import would otherwise produce a page of
-    zeroes that reads as a finding."""
-    serve(monkeypatch, counts(total=5, submissions=0, product_codes=0, regulations=0))
+def test_an_engine_holding_unlabelled_nodes_is_refused(monkeypatch):
+    """What this test actually covered. Five nodes, none carrying a label this
+    graph is made of, trips the co-mingling guard — the message says another KG
+    is loaded, and it is right to."""
+    serve(monkeypatch, counts(total=5, submissions=0, product_codes=0,
+                              regulations=0, edges=2))
     with pytest.raises(SystemExit, match="Another KG is loaded"):
+        bench.shape("http://x")
+
+
+def test_a_genuinely_empty_engine_is_refused(monkeypatch):
+    """The case the name promised and nothing covered: a snapshot that failed
+    to import leaves ZERO nodes, which passes the co-mingling guard (0 == 0)
+    and would produce a page of zeroes that reads as a finding.
+
+    It is caught by the edge guard, which is why that guard had to stop being
+    decorative — `EXPECTED_EDGES` was declared and never checked.
+    """
+    serve(monkeypatch, counts(total=0, submissions=0, product_codes=0,
+                              regulations=0, edges=0))
+    with pytest.raises(SystemExit, match="no CLASSIFIED_AS, GOVERNED_BY edges"):
         bench.shape("http://x")
 
 
@@ -104,17 +141,148 @@ def test_the_timings_are_a_median_not_a_single_reading():
 
 def test_the_index_comparison_runs_last(monkeypatch):
     """It creates indexes. Every timing above it must be the unindexed figure,
-    because that is what the shipped schema produces."""
-    import inspect
-    source = inspect.getsource(bench.report)
-    assert source.index("index_effect(") > source.index("measure(q, url)")
+    because that is what the shipped schema produces.
+
+    Asserted by ORDER OF CALLS, not by where the words appear in the source.
+    Reading source text meant a comment mentioning `index_effect` above the
+    measurement loop would have failed it, and moving the call while leaving
+    the name in a docstring would have passed.
+    """
+    order = []
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: (order.append("shape"),
+                                     {"nodes": 1, "edges": 1,
+                                      "by_label": {"Submission": 1},
+                                      "by_edge": {"CLASSIFIED_AS": 1}})[1])
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: (order.append("measure"), {**q, "rows": [],
+                                        "median_ms": 1.0, "min_ms": 1.0,
+                                        "max_ms": 1.0})[1])
+    monkeypatch.setattr(bench, "index_effect",
+                        lambda url, sizes: (order.append("index_effect"), [])[1])
+    bench.report("http://x")
+    assert order[-1] == "index_effect", order
+    assert "measure" in order, order
 
 
-def test_the_page_makes_no_comparison_it_has_not_measured():
+def test_the_page_makes_no_comparison_it_has_not_measured(monkeypatch):
     """Nothing here has been run against another database, so no claim about
-    relative speed belongs on the page."""
-    import inspect
-    source = inspect.getsource(bench.report)
-    assert "not** a comparison" in source or "not a comparison" in source
+    relative speed belongs on the page.
+
+    Against the RENDERED page, not the source of the function that writes it.
+    A source scan passes on a disclaimer that never reaches the output and
+    fails on the word appearing in a comment.
+    """
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: {"nodes": 1, "edges": 1,
+                                     "by_label": {"Submission": 1},
+                                     "by_edge": {"CLASSIFIED_AS": 1}})
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                                        "min_ms": 1.0, "max_ms": 1.0})
+    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    page = bench.report("http://x").lower()
+    assert "not a comparison" in page.replace("**", ""), \
+        "the page does not say it is not a database comparison"
     for word in ("faster than", "outperform", "beats"):
-        assert word not in source.lower(), f"unmeasured comparison: {word}"
+        assert word not in page, f"unmeasured comparison on the page: {word}"
+
+
+def test_a_pipe_in_a_value_does_not_split_the_row():
+    """Device names and definitions are free text from openFDA. A `|` inside
+    one adds a column and every row from there down renders wrong."""
+    got = bench.table([{"name": "A|B", "n": 1}])
+    body = got.splitlines()[2]
+    assert "A\\|B" in body, got
+    # Unescaped pipes only — those are the ones markdown treats as cell
+    # boundaries. Three: leading, separator, trailing.
+    unescaped = body.replace("\\|", "")
+    assert unescaped.count("|") == 3, got
+
+
+def test_a_column_missing_from_the_first_row_is_still_reported():
+    """Columns were taken from `rows[0]` alone, so a field the first row
+    happened not to carry was dropped from the table entirely — which is what
+    a query with an optional field returns."""
+    got = bench.table([{"a": 1}, {"a": 2, "b": 3}])
+    assert "| a | b |" in got, got
+    assert got.splitlines()[2].endswith("|  |"), got
+
+
+def test_the_index_measurement_refuses_a_graph_it_has_already_indexed(monkeypatch):
+    """It creates the indexes it measures, so a SECOND run against the same
+    instance compares an indexed lookup against an indexed lookup — a scan
+    time that is not a scan, and a speedup near 1 that reads as "the index did
+    nothing". Refused rather than reported wrongly."""
+    serve(monkeypatch, {"SHOW INDEXES": {
+        "columns": ["label", "property", "type"],
+        "records": [["Submission", "id", "BTREE"]]}})
+    got = bench.index_effect("http://x", {"Submission": 19_127})
+    assert got, "nothing reported at all"
+    assert all(row["scan_ms"] is None for row in got), got
+    assert "already indexed" in got[0]["note"], got
+
+
+def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
+    """`QUERY_RESULTS.md` sits in `benchmarks/` and the card is at the repo
+    root, so a bare `DATASET-CARD.md` is a link to a file that is not there.
+
+    Checked on the RENDERED page and resolved against the real tree, because
+    this document is generated — fixing the committed markdown alone would be
+    overwritten by the next run.
+    """
+    import pathlib
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: {"nodes": 1, "edges": 1,
+                                     "by_label": {"Submission": 1},
+                                     "by_edge": {"CLASSIFIED_AS": 1}})
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                                        "min_ms": 1.0, "max_ms": 1.0})
+    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    page = bench.report("http://x")
+
+    assert "DATASET-CARD.md" in page
+    here = pathlib.Path(bench.__file__).resolve().parent
+    for target in re.findall(r"\]\(([^)]+DATASET-CARD\.md)\)", page):
+        assert (here / target).resolve().exists(), (
+            f"the page links {target}, which does not resolve from "
+            f"{here}")
+
+
+def test_the_page_says_its_timings_are_round_trip(monkeypatch):
+    """They include HTTP and JSON decoding. Presented bare, a reader takes
+    them for engine execution time."""
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: {"nodes": 1, "edges": 1,
+                                     "by_label": {"Submission": 1},
+                                     "by_edge": {"CLASSIFIED_AS": 1}})
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                                        "min_ms": 1.0, "max_ms": 1.0})
+    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    page = bench.report("http://x").lower()
+    assert "round-trip" in page or "round trip" in page, \
+        "the page presents timings without saying what is inside them"
+
+
+def test_no_measured_figure_is_copied_into_the_benchmarks_readme():
+    """A measured number copied into a second file drifts the moment the first
+    is regenerated — and this one had, quoting scan times a third lower than a
+    later run produced.
+
+    `QUERY_RESULTS.md` is written by the runner and is the one source. The
+    README may describe what was found; it may not restate the numbers.
+    """
+    import pathlib
+    here = pathlib.Path(bench.__file__).resolve().parent
+    readme = (here / "README.md").read_text(encoding="utf-8")
+
+    timings = re.findall(r"\d+\.\d+\s*ms", readme)
+    assert not timings, (
+        f"the benchmarks README quotes measured timings {timings}; they belong "
+        f"in QUERY_RESULTS.md, which the runner writes")
+    speedups = re.findall(r"\*\*\d+×\*\*", readme)
+    assert not speedups, (
+        f"the benchmarks README quotes measured speedups {speedups}; same "
+        f"reason — one source per figure")
