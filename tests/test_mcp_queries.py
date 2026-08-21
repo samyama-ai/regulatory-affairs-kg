@@ -142,13 +142,45 @@ def test_rows_are_returned_as_named_fields(monkeypatch):
 def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
     """`clearances_under_regulation` is LIMITed. Reading its length as the
     total understates the blast radius of a rule change, which is the one
-    number this graph exists to get right."""
-    import inspect
-    listing = inspect.getsource(queries.clearances_under_regulation)
-    counting = inspect.getsource(queries.count_clearances_under_regulation)
-    assert "LIMIT" in listing
-    assert "LIMIT" not in counting
-    assert "count(s)" in counting
+    number this graph exists to get right.
+
+    Asserted by CALLING both, not by reading their source for the word
+    "LIMIT". The source scan claimed a guarantee it could not give: it never
+    established that the count is larger than the cap, only that one function
+    mentions a keyword and the other does not — and it broke the moment
+    `count(s)` became `count(DISTINCT s)`, which changed nothing about the
+    property it says it protects.
+    """
+    served = {}
+
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(served["payload"]).encode()
+
+    def urlopen(request, *a, **k):
+        cypher = json.loads(request.data)["query"]
+        served["payload"] = (
+            {"columns": ["total"], "records": [[415]]} if "count(" in cypher
+            else {"columns": ["k_number"],
+                  "records": [[f"K{n:06d}"] for n in range(25)]})
+        return R()
+
+    monkeypatch.setattr(queries.urllib.request, "urlopen", urlopen)
+
+    listed = queries.clearances_under_regulation("870.5150", limit=25)
+    total = queries.count_clearances_under_regulation("870.5150")
+
+    assert listed["count"] == 25, "the listing is not capped as expected"
+    assert total["total"] == 415, total
+    assert total["total"] > listed["count"], (
+        "the count came from the capped list, which understates the blast "
+        "radius — the one number this graph exists to get right")
 
 
 # --------------------------------------------------------------------------
@@ -398,3 +430,98 @@ def test_every_limited_query_orders_before_it_limits():
     assert not offenders, (
         f"these limit without ordering, so the page they return is arbitrary: "
         f"{offenders}")
+
+
+def test_a_bad_limit_is_an_error_not_a_traceback_or_a_negative_limit():
+    """`int(limit)` turned "ten" into a ValueError escaping to the caller, and
+    `-5` into `LIMIT -5`, which the engine rejects with a message about the
+    whole statement. Every other bad input in this module returns an error;
+    a bad argument should not be the one case that raises."""
+    for tool, args in ((queries.busiest_regulations, ()),
+                       (queries.clearances_by_advisory_committee, ()),
+                       (queries.clearances_under_regulation, ("870.5150",)),
+                       (queries.product_codes_by_class, ("3",))):
+        for bad in (-5, 0, "ten", None):
+            got = tool(*args, bad)
+            assert got["error"], f"{tool.__name__}({bad!r}) returned no error"
+            assert "limit" in got["error"], got["error"]
+            assert got["count"] == 0, got
+
+
+def test_a_reverse_lookup_of_a_non_string_is_an_error_not_an_attribute_error():
+    """`k_number.upper()` ran before anything could return a Result, so a None
+    or a number hit an AttributeError instead of the error path."""
+    got = queries.regulation_for_clearance(None)
+    assert got["error"] and "string" in got["error"], got
+    assert got["found"] is False
+
+
+def test_an_engine_error_that_is_not_a_string_is_still_reported(monkeypatch):
+    """`payload['error'][:200]` assumes a string. A dict slices to something
+    unreadable and an int raises TypeError — inside the error path, which is
+    the one place that must not fail."""
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps({"error": {"code": 42, "detail": "nope"}}).encode()
+
+    monkeypatch.setattr(queries.urllib.request, "urlopen", lambda *a, **k: R())
+    got = queries.busiest_regulations()
+    assert got["error"] and "42" in got["error"], got
+
+
+def test_a_config_value_with_a_comment_or_quotes_is_read_cleanly(monkeypatch, tmp_path):
+    """An inline `# comment` and surrounding quotes are ordinary YAML.
+    Unstripped, `host: 127.0.0.1  # local` became a hostname ending in
+    "# local" — a URL the engine never answers, and no error saying why."""
+    home = tmp_path / "mcp_server"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        'graph:\n  host: "127.0.0.1"  # local docker\n  port: 8080  # default\n')
+    monkeypatch.delenv("SAMYAMA_URL", raising=False)
+    monkeypatch.setattr(queries, "__file__", str(home / "queries.py"))
+    assert queries.engine_url() == "http://127.0.0.1:8080"
+
+
+def test_a_clearance_counted_once_even_if_it_reaches_a_rule_twice(loaded_engine):
+    """`count(s)` counts PATH MATCHES. A Submission reaching one Regulation
+    through two ProductCodes is one clearance, not two — and this is the figure
+    an agent quotes as blast radius.
+
+    Measured on the loaded graph: at most one ProductCode per Submission, and
+    zero regulations where the two counts differ. So the fixture builds the
+    fan-out the real data does not have, which is the only way to see it.
+    """
+    for statement in (
+        "CREATE (p2:ProductCode {product_code: 'DXZ', device_class: '2', "
+        "source: 'test'})",
+        "MATCH (p:ProductCode {product_code: 'DXZ'}), "
+        "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
+        "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DXZ'}) "
+        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
+    ):
+        assert queries.run(statement).ok
+
+    got = queries.count_clearances_under_regulation("870.5150")
+    assert got["total"] == 1, (
+        f"one clearance reaching the rule through two product codes was counted "
+        f"{got['total']} times")
+
+    # The same fan-out through the other count. Both quote blast radius, so
+    # both have to survive it — the first version of this test covered one and
+    # the second went on double-counting.
+    ranked = queries.busiest_regulations(limit=5)
+    assert ranked["error"] is None, ranked
+    for row in ranked["regulations"]:
+        if row["cfr_section"] == "870.5150":
+            assert row["clearances"] == 1, (
+                f"busiest_regulations counted the same clearance "
+                f"{row['clearances']} times")
+            break
+    else:
+        raise AssertionError(f"870.5150 is missing from the ranking: {ranked}")

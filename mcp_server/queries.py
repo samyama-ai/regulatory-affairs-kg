@@ -75,10 +75,15 @@ def engine_url() -> str:
             if section != "graph":
                 continue
             key, _, value = line.strip().partition(":")
+            # An inline `# comment` and surrounding quotes are both ordinary
+            # YAML. Unstripped, `host: 127.0.0.1  # local` became a hostname
+            # ending in "# local" and `port: "8080"` a port with quotes in it —
+            # a URL the engine never answers, and no error saying why.
+            value = value.split("#")[0].strip().strip("\"'")
             if key == "host":
-                host = value.strip()
+                host = value
             elif key == "port":
-                port = value.strip()
+                port = value
         if host and port:
             return f"http://{host}:{port}"
     return DEFAULT_URL
@@ -123,9 +128,33 @@ def run(cypher: str) -> Result:
         return Result(error=f"engine unreachable: {exc}")
 
     if "error" in payload:
-        return Result(error=f"query rejected: {payload['error'][:200]}")
+        # `payload['error'][:200]` assumes a string. A dict or a list slices to
+        # something unreadable, and an int raises TypeError inside the error
+        # path — the one place that must not fail.
+        return Result(error=f"query rejected: {str(payload['error'])[:200]}")
     columns = payload.get("columns") or []
     return Result(rows=[dict(zip(columns, row)) for row in payload.get("records") or []])
+
+
+def bounded(limit) -> int:
+    """A LIMIT the engine will accept, or a reason it will not.
+
+    `int(limit)` turned "ten" into a ValueError escaping to the caller, and
+    `-5` into `LIMIT -5`, which the engine rejects with a message about the
+    whole statement. An agent gets `Result(error=…)` for everything else in
+    this module; a bad argument should not be the one case that raises.
+    """
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        raise Unbounded(f"limit must be a whole number, got {limit!r}") from None
+    if value < 1:
+        raise Unbounded(f"limit must be at least 1, got {value}")
+    return value
+
+
+class Unbounded(Exception):
+    """A limit this module will not send."""
 
 
 def quoted(value) -> str:
@@ -168,6 +197,12 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
 
     cfr_section: e.g. "870.5150"
     """
+    try:
+        rows_wanted = bounded(limit)
+    except Unbounded as exc:
+        return {"cfr_section": cfr_section, "clearances": [], "count": 0,
+                "error": str(exc)}
+
     result = run(
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
@@ -175,7 +210,7 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
         f"RETURN s.id AS clearance, s.device_name AS device, "
         f"s.applicant AS applicant, s.decision_date AS decided, "
         f"p.product_code AS product_code "
-        f"ORDER BY s.decision_date DESC LIMIT {int(limit)}"
+        f"ORDER BY s.decision_date DESC LIMIT {rows_wanted}"
     )
     return {"cfr_section": cfr_section, "clearances": result.rows,
             "count": len(result.rows), "error": result.error}
@@ -192,7 +227,11 @@ def count_clearances_under_regulation(cfr_section: str) -> dict:
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
         f"WHERE r.cfr_section = {quoted(cfr_section)} "
-        f"RETURN count(s) AS total"
+        # DISTINCT for the same reason `busiest_regulations` uses it: a
+        # Submission reaching this Regulation through two ProductCodes is one
+        # clearance, not two. This is the figure an agent quotes as blast
+        # radius, so it must not fan out.
+        f"RETURN count(DISTINCT s) AS total"
     )
     total = result.rows[0].get("total") if result.rows else None
     return {"cfr_section": cfr_section, "total": total, "error": result.error}
@@ -221,15 +260,23 @@ def regulation_for_clearance(k_number: str) -> dict:
 
     k_number: e.g. "K233820"
     """
+    # `.upper()` ran before anything could return a Result, so a None or a
+    # number reached an AttributeError instead of the error path every other
+    # bad input in this module takes.
+    if not isinstance(k_number, str):
+        return {"k_number": k_number, "governed_by": [], "found": False,
+                "error": f"k_number must be a string, got {type(k_number).__name__}"}
+    k_number = k_number.upper()
+
     result = run(
         f"MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)"
         f"-[:GOVERNED_BY]->(r:Regulation) "
-        f"WHERE s.id = {quoted(k_number.upper())} "
+        f"WHERE s.id = {quoted(k_number)} "
         f"RETURN s.device_name AS device, s.applicant AS applicant, "
         f"s.decision_date AS decided, p.product_code AS product_code, "
         f"p.device_class AS device_class, r.cfr_section AS cfr_section"
     )
-    return {"k_number": k_number.upper(), "governed_by": result.rows,
+    return {"k_number": k_number, "governed_by": result.rows,
             "found": bool(result.rows), "error": result.error}
 
 
@@ -239,11 +286,21 @@ def regulation_for_clearance(k_number: str) -> dict:
 
 def busiest_regulations(limit: int = 10) -> dict:
     """The rules carrying the most clearances — where a change hurts most."""
+    try:
+        rows_wanted = bounded(limit)
+    except Unbounded as exc:
+        return {"regulations": [], "count": 0, "error": str(exc)}
+
     result = run(
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
-        f"RETURN r.cfr_section AS cfr_section, count(s) AS clearances "
-        f"ORDER BY clearances DESC LIMIT {int(limit)}"
+        # `count(DISTINCT s)`, not `count(s)`: a Submission reaching one
+        # Regulation through two ProductCodes would be counted twice. Measured
+        # on the loaded graph — at most one ProductCode per Submission, and
+        # zero regulations where the two counts differ — so this is correct by
+        # construction rather than by a property of today's data.
+        f"RETURN r.cfr_section AS cfr_section, count(DISTINCT s) AS clearances "
+        f"ORDER BY clearances DESC LIMIT {rows_wanted}"
     )
     return {"regulations": result.rows, "count": len(result.rows),
             "error": result.error}
@@ -258,10 +315,15 @@ def clearances_by_advisory_committee(limit: int = 15) -> dict:
     committee is the reviewing authority, and it is loaded, so this is the
     question that can actually be answered.
     """
+    try:
+        rows_wanted = bounded(limit)
+    except Unbounded as exc:
+        return {"committees": [], "count": 0, "error": str(exc)}
+
     result = run(
         f"MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL "
         f"RETURN s.advisory_committee AS committee, count(s) AS clearances "
-        f"ORDER BY clearances DESC LIMIT {int(limit)}"
+        f"ORDER BY clearances DESC LIMIT {rows_wanted}"
     )
     return {"committees": result.rows, "count": len(result.rows),
             "error": result.error}
@@ -272,6 +334,12 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
 
     device_class: "1", "2" or "3" — Class III is the high-risk route.
     """
+    try:
+        rows_wanted = bounded(limit)
+    except Unbounded as exc:
+        return {"device_class": device_class, "product_codes": [], "count": 0,
+                "error": str(exc)}
+
     result = run(
         f"MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
         f"WHERE p.device_class = {quoted(device_class)} "
@@ -280,7 +348,7 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         # ORDER BY before LIMIT, or repeated calls return different subsets of
         # the same answer — the hazard `clearances_under_regulation` already
         # guards against, missing here.
-        f"ORDER BY p.product_code LIMIT {int(limit)}"
+        f"ORDER BY p.product_code LIMIT {rows_wanted}"
     )
     return {"device_class": device_class, "product_codes": result.rows,
             "count": len(result.rows), "error": result.error}
