@@ -43,6 +43,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# The loader's literal encoder, not a second one. `etl/cypher.py` is pure text
+# functions with no engine dependency, so this costs nothing and keeps one
+# measured implementation of "what 1.1.0 accepts inside a literal".
+from etl.cypher import lit
+
 DEFAULT_URL = "http://127.0.0.1:8080"
 
 
@@ -57,7 +62,18 @@ def engine_url() -> str:
     config = Path(__file__).resolve().parent / "config.yaml"
     if config.exists():
         host = port = None
+        # Deliberately naive — this is two keys out of a small file we own, and
+        # a YAML dependency for that would be the larger cost. But it tracks
+        # WHICH BLOCK it is in: matching bare `host:`/`port:` anywhere meant a
+        # `server.host` added later would silently repoint the MCP server at
+        # something that is not the graph.
+        section = None
         for line in config.read_text().splitlines():
+            if line.strip() and not line.startswith((" ", "\t")):
+                section = line.strip().rstrip(":")
+                continue
+            if section != "graph":
+                continue
             key, _, value = line.strip().partition(":")
             if key == "host":
                 host = value.strip()
@@ -92,7 +108,10 @@ def run(cypher: str) -> Result:
         headers={"Content-Type": "application/json"},
     )
     try:
-        payload = json.loads(urllib.request.urlopen(request, timeout=60).read())
+        # `with`: an unclosed response holds its socket until the garbage
+        # collector gets to it, and an MCP server is long-lived.
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         # HTTPError subclasses URLError and must be caught first, or a 500 from
         # a running engine is reported as "no engine" — the one wrong diagnosis
@@ -109,14 +128,31 @@ def run(cypher: str) -> Result:
     return Result(rows=[dict(zip(columns, row)) for row in payload.get("records") or []])
 
 
-def quoted(value: str) -> str:
-    """Single-quote a literal for Cypher.
+def quoted(value) -> str:
+    """A Cypher literal, via the encoder the loader already uses.
 
-    1.1.0's /api/query takes no parameters, so values are inlined. Escaping the
-    quote is the whole of the defence, and it is applied in one place rather
-    than at each call site.
+    **This used to escape with backslashes, which this engine does not have.**
+    `\\'` is a parse error in 1.1.0, not an escaped quote — measured, and
+    recorded in DATASET-CARD.md known issue 6 and in `etl/cypher.lit`. So
+    `regulations_for_product("O'Brien")` did not inline safely, it produced a
+    statement the engine rejects, surfaced to the agent as "query rejected".
+    Fail-closed, but not what the code claimed. And `\\\\` did not double a
+    backslash; it inserted two literal ones, silently changing the value
+    matched.
+
+    `etl.cypher.lit` chooses the quote style per value instead, which is the
+    only thing that works against an engine with no escape sequences. It is a
+    pure text function with no engine dependency, so importing it costs
+    nothing — and two divergent literal encoders in one repo is how the second
+    one drifts, which is exactly what happened here.
+
+    **Everything reaching this function is forced to `str` first.** `lit()`
+    emits numbers unquoted, correctly — but every value these tools compare
+    against is stored as text, `device_class` included ("1", "2", "3" and "N",
+    measured against the loaded graph). An int reaching `lit()` would render
+    `2` and match nothing, silently.
     """
-    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return lit("" if value is None else str(value))
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +276,11 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         f"MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
         f"WHERE p.device_class = {quoted(device_class)} "
         f"RETURN p.product_code AS product_code, p.definition AS device_category, "
-        f"r.cfr_section AS cfr_section LIMIT {int(limit)}"
+        f"r.cfr_section AS cfr_section "
+        # ORDER BY before LIMIT, or repeated calls return different subsets of
+        # the same answer — the hazard `clearances_under_regulation` already
+        # guards against, missing here.
+        f"ORDER BY p.product_code LIMIT {int(limit)}"
     )
     return {"device_class": device_class, "product_codes": result.rows,
             "count": len(result.rows), "error": result.error}
@@ -254,9 +294,12 @@ def graph_provenance() -> dict:
     built from.
     """
     totals = run("MATCH (n) RETURN count(n) AS nodes")
+    # Early: the second query against an engine already known to be down is a
+    # second round trip and a second timeout, for an answer we have.
+    if not totals.ok:
+        return {"nodes": None, "by_source": [], "error": totals.error}
     sourced = run("MATCH (n) WHERE n.source IS NOT NULL "
                   "RETURN n.source AS source, count(n) AS nodes "
                   "ORDER BY nodes DESC")
-    error = totals.error or sourced.error
     return {"nodes": totals.rows[0].get("nodes") if totals.rows else None,
-            "by_source": sourced.rows, "error": error}
+            "by_source": sourced.rows, "error": sourced.error}

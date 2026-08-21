@@ -106,7 +106,6 @@ def test_a_500_is_not_reported_as_a_missing_engine(monkeypatch):
 
 def test_a_rejected_query_is_an_error_not_an_empty_result(monkeypatch):
     """The engine answers 200 with an `error` key for a parse failure."""
-    monkeypatch.setattr(queries, "run", queries.run)
     serve(monkeypatch, {"error": "Parse error: unexpected token"})
     got = queries.regulations_for_product("DXY")
     assert got["error"] and "rejected" in got["error"]
@@ -157,14 +156,32 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,expected", [
-    ("870.5150", "'870.5150'"),
-    ("O'Brien", "'O\\'Brien'"),
-    ("back\\slash", "'back\\\\slash'"),
+    ("870.5150", chr(34) + "870.5150" + chr(34)),
+    ("O'Brien", chr(34) + "O'Brien" + chr(34)),
+    ("back\\slash", chr(34) + "back\\slash" + chr(34)),
+    ('say "hi"', chr(39) + 'say "hi"' + chr(39)),
 ])
-def test_a_literal_is_escaped_before_it_is_inlined(value, expected):
-    """1.1.0's /api/query takes no parameters, so values are inlined. That
-    makes escaping the whole of the defence, and it is done in one place."""
+def test_a_literal_is_quoted_by_choosing_a_delimiter_not_by_escaping(value, expected):
+    """1.1.0 has NO escape sequences inside a literal, so the delimiter is
+    chosen per value rather than the quote being escaped.
+
+    These expectations used to assert the backslash form. That is why they
+    passed while the engine rejected the statement: they compared
+    `quoted()`'s output against itself, and the one thing neither of them
+    consulted was the engine. Measured against 1.1.0 — the old form returns
+    HTTP 400, this one parses.
+    """
     assert queries.quoted(value) == expected
+
+
+def test_an_integer_is_matched_as_the_text_it_is_stored_as():
+    """`lit()` emits numbers unquoted, correctly — the engine keeps the type.
+    But every value these tools compare against is stored as TEXT, including
+    `device_class`, measured as "1", "2", "3" and "N" on the loaded graph. An
+    int reaching the encoder would render `2`, match nothing, and say so in no
+    way at all."""
+    assert queries.quoted(2) == chr(34) + "2" + chr(34)
+    assert queries.quoted("2") == chr(34) + "2" + chr(34)
 
 
 def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
@@ -178,10 +195,12 @@ def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
     queries.regulations_for_product("' RETURN 1 //")
     cypher = sent[0]
     # Counting keywords cannot tell safe from unsafe — the injected text is
-    # present either way. What matters is that the quote immediately before the
-    # payload is escaped, so the literal does not terminate there.
-    assert "\\' RETURN" in cypher, f"the injected quote was not escaped: {cypher}"
-    assert cypher.rstrip().endswith("specialty"), f"query truncated: {cypher[-60:]}"
+    # present either way. What matters is that the literal does not TERMINATE
+    # at the injected quote, and with no escape sequences in this engine the
+    # only way to achieve that is to delimit with the other quote character.
+    payload = chr(34) + "' RETURN 1 //" + chr(34)
+    assert payload in cypher, "the payload is not inside one literal: " + cypher
+    assert cypher.rstrip().endswith("specialty"), "query truncated: " + cypher[-60:]
 
 
 # --------------------------------------------------------------------------
@@ -194,9 +213,34 @@ def test_the_environment_wins_over_the_config(monkeypatch):
 
 
 def test_the_config_file_is_read_when_the_environment_is_silent(monkeypatch):
+    """Against the VALUES in mcp_server/config.yaml, not the shape of a URL.
+
+    `startswith("http://")` is satisfied by `DEFAULT_URL` too, so this passed
+    with the entire config-parsing branch deleted — a test of nothing, in the
+    code that decides where the server points.
+    """
     monkeypatch.delenv("SAMYAMA_URL", raising=False)
-    url = queries.engine_url()
-    assert url.startswith("http://"), url
+    assert queries.engine_url() == "http://127.0.0.1:8080"
+
+
+def test_a_host_outside_the_graph_block_does_not_repoint_the_server(monkeypatch, tmp_path):
+    """The parser matched a bare `host:`/`port:` under ANY section, so it
+    worked by luck — `config.yaml` happens to declare them only under `graph:`.
+    Someone adding `server.host` later would have silently repointed the MCP
+    server at something that is not the graph."""
+    home = tmp_path / "mcp_server"
+    home.mkdir()
+    # `graph:` FIRST and `server:` second, deliberately. With the sections
+    # reversed a last-wins parser lands on the right answer by accident, which
+    # is how the first version of this test passed against the very parser it
+    # was written to catch.
+    (home / "config.yaml").write_text(
+        "graph:\n  host: 127.0.0.1\n  port: 8080\n"
+        "server:\n  host: 10.0.0.1\n  port: 9999\n")
+    monkeypatch.delenv("SAMYAMA_URL", raising=False)
+    monkeypatch.setattr(queries, "__file__", str(home / "queries.py"))
+    assert queries.engine_url() == "http://127.0.0.1:8080", (
+        "a host declared outside the graph block repointed the server")
 
 
 # --------------------------------------------------------------------------
@@ -207,6 +251,14 @@ FIXTURE = [
     "CREATE (r:Regulation {cfr_section: '870.5150', source: 'test'})",
     "CREATE (p:ProductCode {product_code: 'DXY', device_class: '2', "
     "definition: 'A test category', medical_specialty: 'CV', source: 'test'})",
+    # A product code carrying an APOSTROPHE. Every engine-backed test used
+    # quote-free fixture values, which is why "verified against a fresh 1.1.0"
+    # did not cover the path the old backslash escaping broke.
+    "CREATE (p:ProductCode {product_code: \"O'BRIEN\", device_class: '3', "
+    "definition: \"A category with an apostrophe\", medical_specialty: 'CV', "
+    "source: 'test'})",
+    "MATCH (p:ProductCode {product_code: \"O'BRIEN\"}), "
+    "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
     "CREATE (s:Submission {id: 'K999001', device_name: 'A test device', "
     "applicant: 'Acme', decision_date: '2024-01-02', "
     "advisory_committee: 'Cardiovascular', source: 'test'})",
@@ -217,7 +269,7 @@ FIXTURE = [
 ]
 
 
-def test_url() -> str | None:
+def configured_test_url() -> str | None:
     """Only `SAMYAMA_TEST_URL`. Never `SAMYAMA_URL`, never a default.
 
     A test that writes and deletes must not be able to find an engine by
@@ -237,7 +289,7 @@ def engine_available(url: str) -> bool:
 
 @pytest.fixture
 def loaded_engine(monkeypatch):
-    url = test_url()
+    url = configured_test_url()
     if not url or not engine_available(url):
         message = ("no engine at SAMYAMA_TEST_URL"
                    if not url else f"no engine at {url}")
@@ -298,3 +350,51 @@ def test_the_advisory_committee_grouping_returns_rows(loaded_engine):
     got = queries.clearances_by_advisory_committee()
     assert got["error"] is None
     assert any(row["committee"] == "Cardiovascular" for row in got["committees"])
+
+
+def test_an_apostrophe_in_an_argument_reaches_the_engine(loaded_engine):
+    """The path the whole of this PR's literal handling turns on, run against
+    a real 1.1.0 rather than against the encoder's own output.
+
+    The previous implementation escaped with backslashes, which this engine
+    does not have: `'O\\'BRIEN'` is a parse error, so the tool returned
+    "query rejected" for a perfectly ordinary product code. Every engine-backed
+    test used quote-free fixture values, so nothing caught it.
+
+    Measured before fixing: the old form returns HTTP 400 from the engine.
+    """
+    got = queries.regulations_for_product("O'BRIEN")
+    assert got["error"] is None, got["error"]
+    assert [r["cfr_section"] for r in got["regulations"]] == ["870.5150"], got
+
+
+def test_a_double_quote_in_an_argument_reaches_the_engine(loaded_engine):
+    """The other delimiter. A value containing a double quote must be wrapped
+    in single quotes — there is no third option, and no escape."""
+    got = queries.regulations_for_product('say "hi"')
+    assert got["error"] is None, got["error"]
+    assert got["regulations"] == [], got
+
+
+def test_every_limited_query_orders_before_it_limits():
+    """`LIMIT` with no `ORDER BY` is a non-deterministic page: repeated calls
+    can return different subsets of the same answer, and an agent comparing
+    two calls sees a change that did not happen.
+
+    Read off the source of every tool, rather than pinned to the one that had
+    the defect — the next query added here is the one that will repeat it.
+    """
+    import inspect
+    offenders = []
+    for name in TOOLS:
+        source = inspect.getsource(getattr(queries, name))
+        # Comments stripped first. The comment explaining WHY the ordering is
+        # there contains the words "ORDER BY", so scanning raw source let the
+        # check pass on a function whose query had lost it — the first version
+        # of this test was defeated by its own rationale.
+        code = "\n".join(line.split("#")[0] for line in source.splitlines())
+        if "LIMIT" in code and "ORDER BY" not in code:
+            offenders.append(name)
+    assert not offenders, (
+        f"these limit without ordering, so the page they return is arbitrary: "
+        f"{offenders}")

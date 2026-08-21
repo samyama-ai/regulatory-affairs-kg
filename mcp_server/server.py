@@ -20,7 +20,7 @@ from mcp_server import queries
 
 mcp = FastMCP("regulatory-affairs-kg")
 
-for _name in (
+TOOLS = (
     "clearances_under_regulation",
     "count_clearances_under_regulation",
     "regulations_for_product",
@@ -29,11 +29,25 @@ for _name in (
     "clearances_by_advisory_committee",
     "product_codes_by_class",
     "graph_provenance",
-):
-    # Registered by name rather than by eight decorators, so a query added to
-    # queries.py and forgotten here fails a test rather than being silently
-    # unavailable to an agent.
-    mcp.tool()(getattr(queries, _name))
+)
+
+
+def register(server) -> None:
+    """Bind every tool in TOOLS to the server.
+
+    Registered by name rather than by eight decorators, so a query added to
+    queries.py and forgotten here fails a test rather than being silently
+    unavailable to an agent.
+
+    In a function, not a bare module-level loop: the loop variable outlived it
+    and sat in the module namespace, where `getattr`-style introspection picks
+    it up — in the one file whose whole job is wiring.
+    """
+    for name in TOOLS:
+        server.tool()(getattr(queries, name))
+
+
+register(mcp)
 
 
 if __name__ == "__main__":
