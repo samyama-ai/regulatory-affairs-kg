@@ -85,6 +85,9 @@ QUERIES: list[dict] = [
     {
         "name": "Device to law",
         "question": "Which rules must this product code comply with?",
+        # 4,487 of 7,085 product codes carry no `definition` — 63%, measured.
+        # A blank cell in the rendered table is that, not a parse failure, and
+        # the page says so rather than leaving a reader to guess.
         "why": ("One hop from the join hub. `product_code` is on every openFDA "
                 "endpoint; device *names* are not consistent between them, so a "
                 "name is never the key."),
@@ -115,26 +118,38 @@ QUERIES: list[dict] = [
     {
         "name": "Clearances by reviewing authority",
         "question": "Which FDA advisory committees review the most clearances?",
-        "why": ("A grouping over 19,127 submissions. Note this is *decided* "
-                "clearances — openFDA publishes no pending queue, so 'pending by "
-                "authority' has no answer in this data."),
+        "why": ("A grouping over 19,127 submissions. **The distribution is an "
+                "artifact of the slice, not a finding about the FDA**: this "
+                "graph holds 21 CFR part 870 clearances, so Cardiovascular "
+                "leads by construction. What the query demonstrates is the "
+                "grouping, not the ranking. Note also this is *decided* "
+                "clearances — openFDA publishes no pending queue, so 'pending "
+                "by authority' has no answer in this data."),
         "cypher": ("MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL "
                    "RETURN s.advisory_committee AS committee, count(s) AS clearances "
                    "ORDER BY clearances DESC LIMIT 10"),
     },
     {
-        "name": "High-risk device categories",
-        "question": "Which device categories take the Class III route?",
-        "why": "A filtered scan with a join — the population a reviewer starts from.",
+        "name": "High-risk device categories with a rule attached",
+        "question": "How many Class III categories carry a regulation in this slice?",
+        "why": ("A filtered scan with a join — the population a reviewer starts "
+                "from. It is NOT the count of Class III categories: this slice "
+                "holds 531, and only the ones with a GOVERNED_BY edge are "
+                "joinable here."),
         # `count(DISTINCT p)`, not `count(p)`. The bare form counts PATTERN
         # MATCHES, so a product code governed by two regulations would be
-        # counted twice and the figure would overstate the population. Measured
-        # on this graph: at most one regulation per product code, so both forms
-        # give 145 today — the distinct form is correct by construction rather
-        # than by a property of the current data.
+        # counted twice. Measured: at most one regulation per product code, so
+        # both forms agree today — the distinct form is correct by construction
+        # rather than by a property of the current data.
+        #
+        # The column name says what the JOIN counts, not what "Class III" means.
+        # It read `class_three_categories`, which a reader takes as the number
+        # of Class III device categories — measured, that is 531, and only 145
+        # of them carry a GOVERNED_BY edge in this slice. Reporting 145 under
+        # that name understated the population by nearly four times.
         "cypher": ("MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
                    "WHERE p.device_class = '3' "
-                   "RETURN count(DISTINCT p) AS class_three_categories"),
+                   "RETURN count(DISTINCT p) AS class_three_with_a_regulation"),
     },
     {
         "name": "Provenance",
@@ -156,7 +171,10 @@ def run(cypher: str, url: str) -> tuple[dict, float]:
     )
     started = time.perf_counter()
     try:
-        payload = json.loads(urllib.request.urlopen(request, timeout=180).read())
+        # `with`: an unclosed response holds its socket until the garbage
+        # collector gets to it, and this runs one request per repeat per query.
+        with urllib.request.urlopen(request, timeout=180) as response:
+            payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         # Caught before URLError, which it subclasses — otherwise a 500 from a
         # running engine reports as "no engine".
@@ -252,6 +270,17 @@ def existing_indexes(url: str) -> set[tuple[str, str]]:
     refusal below possible.
     """
     payload, _ = run("SHOW INDEXES", url)
+    columns = payload.get("columns") or []
+    # Validated, not assumed. If `SHOW INDEXES` ever renames its columns,
+    # `row.get("label")` returns None for every row, the set holds
+    # `(None, None)`, nothing clashes, and the guard below silently stops
+    # guarding — reporting an indexed instance as though it were fresh.
+    missing = [name for name in ("label", "property") if name not in columns]
+    if missing:
+        raise SystemExit(
+            f"SHOW INDEXES no longer returns {missing} — it returns {columns}. "
+            f"The already-indexed guard reads those columns, and without them "
+            f"it would report an indexed instance as though it were fresh.")
     return {(row.get("label"), row.get("property")) for row in rows_of(payload)}
 
 
@@ -271,25 +300,31 @@ def index_effect(url: str, sizes: dict) -> list[dict]:
     unindexed figure — which is what the shipped schema currently produces.
     """
     already = existing_indexes(url)
-    clashes = sorted(f"{label}.{prop}" for label, prop, _ in KEYS
-                     if (label, prop) in already)
-    if clashes:
-        return [{"key": key, "nodes": sizes.get(key.split(".")[0], 0),
-                 "scan_ms": None, "indexed_ms": None, "speedup": None,
-                 "note": "already indexed — unindexed figure not measurable here"}
-                for key in clashes]
 
     def median(cypher: str) -> float:
         return statistics.median(run(cypher, url)[1] for _ in range(REPEATS))
 
-    out = []
-    before = {label: median(cypher) for label, _, cypher in KEYS}
-    for label, prop, _ in KEYS:
+    # Per key, not all-or-nothing. Returning only the clashes dropped every key
+    # that was still measurable — so one stale index on one label silently
+    # removed the other two rows from the report, and a reader saw a shorter
+    # table with nothing saying why.
+    measurable = [(label, prop, cypher) for label, prop, cypher in KEYS
+                  if (label, prop) not in already]
+    unmeasurable = [{"key": f"{label}.{prop}", "nodes": sizes.get(label, 0),
+                     "scan_ms": None, "indexed_ms": None, "speedup": None,
+                     "note": "already indexed — unindexed figure not measurable here"}
+                    for label, prop, _ in KEYS if (label, prop) in already]
+    if not measurable:
+        return unmeasurable
+
+    out = list(unmeasurable)
+    before = {label: median(cypher) for label, _, cypher in measurable}
+    for label, prop, _ in measurable:
         # Re-creating an existing index is accepted by 1.1.0 rather than being
         # an error — measured — so this cannot abort a run on its own. The
         # guard above exists for the FIGURES, not for the statement.
         run(f"CREATE INDEX ON :{label}({prop})", url)
-    for label, prop, cypher in KEYS:
+    for label, prop, cypher in measurable:
         after = median(cypher)
         out.append({"key": f"{label}.{prop}", "nodes": sizes.get(label, 0),
                     "scan_ms": before[label], "indexed_ms": after,
@@ -361,7 +396,11 @@ def report(url: str, with_index_effect: bool = True) -> str:
     for edge, count in sorted(stats["by_edge"].items(), key=lambda kv: -kv[1]):
         lines.append(f"| `{edge}` | {count:,} |")
     lines += [f"| **Total edges** | **{stats['edges']:,}** |", "",
-              "This is a **bounded slice**, not the full 31,120,490 openFDA records —",
+              "**A blank `definition` cell is missing source data, not a parse "
+        "failure.** 4,487 of 7,085 product codes carry no definition in "
+        "openFDA — 63%, measured by this run's own provenance query.",
+        "",
+        "This is a **bounded slice**, not the full 31,120,490 openFDA records —",
               "see [`../DATASET-CARD.md`](../DATASET-CARD.md) for what was loaded "
               "and why.", "", "---", ""]
 
@@ -394,6 +433,9 @@ def report(url: str, with_index_effect: bool = True) -> str:
         "one of those keys still scans the whole label.",
         "",
     ]
+    # Bound before the branch: it is only assigned where the comparison runs,
+    # and the prose gate below reads it on every path.
+    measured_keys: list[dict] = []
     if not with_index_effect:
         lines += [
             "_Not measured on this run._ The comparison CREATES INDEXES, so it "
@@ -404,6 +446,7 @@ def report(url: str, with_index_effect: bool = True) -> str:
         ]
     else:
         keys = index_effect(url, stats["by_label"])
+        measured_keys = [k for k in keys if k.get("scan_ms") is not None]
         lines += [
             "| Key | Nodes | Scan | Indexed | Speedup |",
             "|---|---:|---:|---:|---:|",
@@ -415,16 +458,23 @@ def report(url: str, with_index_effect: bool = True) -> str:
             else:
                 lines.append(f"| `{k['key']}` | {k['nodes']:,} | {k['scan_ms']:.1f} ms | "
                              f"{k['indexed_ms']:.1f} ms | **{k['speedup']:.0f}×** |")
+    lines += [""]
+    # The claim only holds where something was measured. It was emitted
+    # unconditionally, so a run that skipped the comparison — or found every
+    # key already indexed — printed "the speedup tracks label size almost
+    # exactly" above a table of dashes.
+    if measured_keys:
+        lines += [
+            "The speedup tracks label size almost exactly, which is what a full scan",
+            "looks like. The schema already records that a constraint in 1.1.0 declares",
+            "the key rather than guarding an insert; it does not index it either, and",
+            "that had not been measured until now.",
+            "",
+        ]
     lines += [
-        "",
-        "The speedup tracks label size almost exactly, which is what a full scan",
-        "looks like. The schema already records that a constraint in 1.1.0 declares",
-        "the key rather than guarding an insert; it does not index it either, and",
-        "that had not been measured until now.",
-        "",
         "Every timing in the queries above is the **unindexed** figure, because that",
-        "is what the shipped schema produces today. The indexes are created at the",
-        "end of this run, so nothing above benefits from them.",
+        "is what the shipped schema produces today. The indexes, where this run",
+        "created any, are created at the end, so nothing above benefits from them.",
         "",
     ]
 

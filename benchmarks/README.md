@@ -5,15 +5,20 @@ Nine queries against the loaded graph, with measured timings.
 is typed in.
 
 **Load from source.** There is no published snapshot — `README.md` and
-`DATASET-CARD.md` both say so, and `data/` is not in the tree, so the import
-below cannot be the primary path:
+`DATASET-CARD.md` both say so, and `data/` is not in the tree, so importing one
+cannot be the primary path:
 
 ```bash
 docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-python -m etl.download_openfda      # about 4 minutes
-python -m etl.load_openfda          # about 16 minutes
+python -m etl.download_openfda      # ~6 min
+python -m etl.load_openfda          # ~10 min
 python -m benchmarks.run_queries
 ```
+
+Those two figures come from the root [`README.md`](../README.md), and the load
+is the 598 seconds [`DATASET-CARD.md`](../DATASET-CARD.md) records for 53,811
+statements at ~90/sec. This page used to say 4 and 16 minutes, which agreed
+with neither.
 
 Once a snapshot exists — a release is not cut yet — importing one is faster
 than reloading:
@@ -33,7 +38,7 @@ only way to get the figures.
 
 The timings are the point of running it, but the most useful thing it measured
 was not a timing. **A uniqueness constraint in 1.1.0 declares the key and does
-not index it**, so every point lookup on a MERGE key scans the whole label:
+not index it**, so every point lookup on a MERGE key scans the whole label.
 
 The speedup tracks label size, which is what a scan looks like — the figures
 are in [`QUERY_RESULTS.md`](QUERY_RESULTS.md#a-uniqueness-constraint-does-not-create-an-index),

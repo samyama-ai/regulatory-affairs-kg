@@ -216,11 +216,41 @@ def test_the_index_measurement_refuses_a_graph_it_has_already_indexed(monkeypatc
     nothing". Refused rather than reported wrongly."""
     serve(monkeypatch, {"SHOW INDEXES": {
         "columns": ["label", "property", "type"],
-        "records": [["Submission", "id", "BTREE"]]}})
+        "records": [[label, prop, "BTREE"] for label, prop, _ in bench.KEYS]}})
     got = bench.index_effect("http://x", {"Submission": 19_127})
     assert got, "nothing reported at all"
     assert all(row["scan_ms"] is None for row in got), got
     assert "already indexed" in got[0]["note"], got
+
+
+def test_one_stale_index_does_not_remove_the_keys_still_measurable(monkeypatch):
+    """Returning only the clashing keys dropped every key that could still be
+    measured, so one stale index on one label silently shortened the table and
+    nothing in the output said why.
+
+    Every key is reported: the indexed one carries its note, the rest carry
+    figures.
+    """
+    serve(monkeypatch, {"SHOW INDEXES": {
+        "columns": ["label", "property", "type"],
+        "records": [["Submission", "id", "BTREE"]]}})
+    got = bench.index_effect("http://x", {label: 1 for label, _, _ in bench.KEYS})
+    assert len(got) == len(bench.KEYS), got
+    noted = [row for row in got if row["scan_ms"] is None]
+    measured = [row for row in got if row["scan_ms"] is not None]
+    assert [row["key"] for row in noted] == ["Submission.id"], noted
+    assert len(measured) == len(bench.KEYS) - 1, measured
+
+
+def test_a_renamed_show_indexes_column_is_refused_not_ignored(monkeypatch):
+    """`row.get("label")` returns None for every row if the column is renamed,
+    the set holds `(None, None)`, nothing clashes — and the guard silently
+    stops guarding, reporting an indexed instance as though it were fresh."""
+    serve(monkeypatch, {"SHOW INDEXES": {
+        "columns": ["name", "prop", "type"],
+        "records": [["Submission", "id", "BTREE"]]}})
+    with pytest.raises(SystemExit, match="SHOW INDEXES no longer returns"):
+        bench.existing_indexes("http://x")
 
 
 def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
@@ -286,3 +316,72 @@ def test_no_measured_figure_is_copied_into_the_benchmarks_readme():
     assert not speedups, (
         f"the benchmarks README quotes measured speedups {speedups}; same "
         f"reason — one source per figure")
+
+
+def test_the_dry_run_renders_without_the_index_comparison(monkeypatch):
+    """`--print` skips the index measurement, and the prose gate below reads
+    the measured keys on every path. It was assigned only inside the branch
+    that runs the comparison, so the dry run raised `UnboundLocalError` — the
+    one path that is supposed to be safe to take."""
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: {"nodes": 1, "edges": 1,
+                                     "by_label": {"Submission": 1},
+                                     "by_edge": {"CLASSIFIED_AS": 1}})
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                                        "min_ms": 1.0, "max_ms": 1.0})
+
+    def refuse(url, sizes):
+        raise AssertionError("the index comparison ran during a dry run")
+
+    monkeypatch.setattr(bench, "index_effect", refuse)
+    page = bench.report("http://x", with_index_effect=False)
+    assert "Not measured on this run" in page, page[-400:]
+    assert "speedup tracks label size" not in page, (
+        "the page claims the speedup tracks label size with nothing measured")
+
+
+def test_the_speedup_claim_is_not_made_when_nothing_was_measured(monkeypatch):
+    """The claim was emitted unconditionally, so a run finding every key
+    already indexed printed "the speedup tracks label size almost exactly"
+    above a table of dashes."""
+    monkeypatch.setattr(bench, "shape",
+                        lambda url: {"nodes": 1, "edges": 1,
+                                     "by_label": {"Submission": 1},
+                                     "by_edge": {"CLASSIFIED_AS": 1}})
+    monkeypatch.setattr(bench, "measure",
+                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                                        "min_ms": 1.0, "max_ms": 1.0})
+    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [
+        {"key": "Submission.id", "nodes": 1, "scan_ms": None,
+         "indexed_ms": None, "speedup": None, "note": "already indexed"}])
+    page = bench.report("http://x")
+    assert "already indexed" in page
+    assert "speedup tracks label size" not in page, (
+        "the claim was made above a table that measured nothing")
+
+
+def test_the_response_is_closed(monkeypatch):
+    """An unclosed response holds its socket until the garbage collector gets
+    to it, and this issues one request per repeat per query — nine queries at
+    five repeats before the index comparison even starts.
+
+    Watched, not read out of the source: a `with` in a comment satisfies a
+    source scan, and a correct refactor that closes it another way fails one.
+    """
+    closed = []
+
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            closed.append(True)
+            return False
+
+        def read(self):
+            return json.dumps({"columns": ["c"], "records": [[1]]}).encode()
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", lambda *a, **k: R())
+    bench.run("MATCH (n) RETURN count(n)", "http://x")
+    assert closed, "the response was never closed"
