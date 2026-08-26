@@ -55,18 +55,36 @@ extractor, which does not exist yet. A tool for them would be a second stub.
 
 ## Layout
 
-`queries.py` holds the traversals and has **no MCP dependency**, so they are
-testable without `fastmcp` installed. `server.py` is wiring only, and registers
-the tools by name — a query added to `queries.py` and forgotten there fails a
-test rather than being silently unavailable to an agent.
+Three modules, and **none of them has an MCP dependency except `server.py`** —
+so every traversal is testable without `fastmcp` installed.
+
+| | |
+|---|---|
+| `engine.py` | the transport and the literal encoder: where the graph is, how a statement is sent, what a failure comes back as, and how a Python value becomes Cypher an engine with no escape sequences can parse |
+| `queries.py` | the eight traversals, and nothing else |
+| `server.py` | wiring only — it registers the tools by name |
+
+`queries.py` was one file until it passed the 500-line review limit; review
+skips a file over it, so an oversized module is an unread one.
+
+A query added to `queries.py` and forgotten in `server.py` fails a test. That
+claim used to be false: the guarding test iterated its own hardcoded copy of
+the tool list, so a query missing from both passed. The expected set is
+derived from `queries.py` now — every public function that calls `run` — and
+compared against the tuple `server.py` declares.
 
 ## Tests
 
 ```bash
-pytest tests/test_mcp_queries.py                       # no engine needed
+pytest tests/test_mcp_engine.py tests/test_mcp_queries.py   # no engine needed
+
 docker run --rm -p 8111:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-SAMYAMA_TEST_URL=http://localhost:8111 pytest tests/test_mcp_queries.py
+SAMYAMA_TEST_URL=http://localhost:8111 pytest tests/test_mcp_live.py
 ```
+
+Note the second file: `tests/test_mcp_live.py` is where the engine-backed
+tests live. Setting `SAMYAMA_TEST_URL` and running `tests/test_mcp_queries.py`
+sets a variable that file ignores and runs no engine test at all.
 
 **`SAMYAMA_TEST_URL`, not `SAMYAMA_URL`, and never port 8080.** The
 engine-backed tests write and `DETACH DELETE` fixture nodes, and doing that

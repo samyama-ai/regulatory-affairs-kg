@@ -14,7 +14,7 @@ no engine is reachable.
 from __future__ import annotations
 import os
 import pytest
-from mcp_server import queries
+from mcp_server import engine, queries
 from tests.mcp_support import FIXTURE, configured_test_url, engine_available
 
 
@@ -31,7 +31,7 @@ def loaded_engine(monkeypatch):
     # Point the queries at the test engine only for the duration of the test.
     monkeypatch.setenv("SAMYAMA_URL", url)
 
-    before = queries.run("MATCH (n) RETURN count(n) AS n").rows
+    before = engine.run("MATCH (n) RETURN count(n) AS n").rows
     existing = before[0]["n"] if before else 0
     if existing:
         pytest.fail(
@@ -39,10 +39,45 @@ def loaded_engine(monkeypatch):
             f"These tests write and DETACH DELETE; run them against a fresh "
             f"instance. See DATASET-CARD.md issue 10.")
 
-    for statement in FIXTURE:
-        queries.run(statement)
-    yield
-    queries.run("MATCH (n) WHERE n.source = 'test' DETACH DELETE n")
+    # Every load is checked. An unchecked `run()` returning an error left the
+    # graph half-built, and the first assertion in the test then failed with
+    # "K999001 not found" — which reads as a broken traversal rather than a
+    # fixture that never loaded.
+    #
+    # In a try/finally, because the check above can now RAISE: without it a
+    # failed load skips the teardown, leaves `source='test'` nodes behind, and
+    # every later run aborts on the "engine holding N nodes" guard — one bad
+    # statement poisoning the suite until someone clears the engine by hand.
+    try:
+        for statement in FIXTURE:
+            result = engine.run(statement)
+            assert result.ok, (
+                f"the fixture did not load, so nothing below is testing what "
+                f"it claims: {result.error}\n  statement: {statement[:120]}")
+        yield
+    finally:
+        # UNCONDITIONAL, not scoped to `source = 'test'`, and that is a
+        # correction rather than a shortcut.
+        #
+        # The scoped form was believed to be the safety net — "point this at a
+        # loaded graph and only test nodes die". Measured on 1.1.0, it is not:
+        # after a DETACH DELETE, a node created later with NO `source`
+        # property at all is still returned by `WHERE n.source = 'test'`, so
+        # the scoped delete removes nodes it never wrote. It deletes MORE than
+        # it claims, not less. (DATASET-CARD.md known issue 10, whose stated
+        # mechanism this reproduces.)
+        #
+        # The real protection is the emptiness guard above, which refuses to
+        # run at all unless the engine holds zero nodes. Given that, deleting
+        # everything is exactly what "remove what this fixture wrote" means —
+        # and it does not rest on a WHERE clause this engine gets wrong.
+        engine.run("MATCH (n) DETACH DELETE n")
+
+        left = engine.run("MATCH (n) RETURN count(n) AS n").rows
+        remaining = left[0]["n"] if left else 0
+        assert not remaining, (
+            f"{remaining:,} node(s) survived the teardown, so the next run "
+            f"will fail on the emptiness guard instead of here.")
 
 
 def test_the_change_impact_query_returns_the_clearance(loaded_engine):
@@ -52,11 +87,42 @@ def test_the_change_impact_query_returns_the_clearance(loaded_engine):
     assert any(row["clearance"] == "K999001" for row in got["clearances"])
 
 
-def test_the_count_matches_the_listing(loaded_engine):
-    listed = queries.clearances_under_regulation("870.5150")
+def test_the_count_is_the_total_and_the_listing_is_the_page(loaded_engine):
+    """The two tools answer different questions, and the old test could not
+    tell them apart.
+
+    `clearances_under_regulation` takes `limit` (25 by default) and applies it;
+    `count_clearances_under_regulation` does not. Asserting they are equal held
+    only because the fixture carries ONE clearance — 1 == 1 passes whether the
+    count is right, wrong, or also limited. An agent that reads a page of 25
+    and a total of 25 concludes it has seen everything.
+
+    So: a second clearance, and a limit that bites.
+    """
+    for statement in (
+        "CREATE (s:Submission {id: 'K999002', device_name: 'A second device', "
+        "applicant: 'Acme', decision_date: '2024-02-03', "
+        "advisory_committee: 'Cardiovascular', source: 'test'})",
+        "MATCH (s:Submission {id: 'K999002'}), (p:ProductCode {product_code: 'DXY'}) "
+        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
+    ):
+        assert engine.run(statement).ok
+
     counted = queries.count_clearances_under_regulation("870.5150")
     assert counted["error"] is None
-    assert counted["total"] == len(listed["clearances"])
+    assert counted["total"] == 2, (
+        f"two clearances reach 870.5150; the count says {counted['total']}")
+
+    full = queries.clearances_under_regulation("870.5150")
+    assert full["error"] is None
+    assert len(full["clearances"]) == 2, "the unlimited listing lost a row"
+
+    paged = queries.clearances_under_regulation("870.5150", limit=1)
+    assert paged["error"] is None
+    assert len(paged["clearances"]) == 1, "the limit was not applied"
+    assert counted["total"] == 2, (
+        "the count is limited too — an agent reading a full page would have "
+        "no way to learn there is more")
 
 
 def test_the_product_to_law_join_resolves(loaded_engine):
@@ -124,7 +190,7 @@ def test_a_clearance_counted_once_even_if_it_reaches_a_rule_twice(loaded_engine)
         "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DXZ'}) "
         "CREATE (s)-[:CLASSIFIED_AS]->(p)",
     ):
-        assert queries.run(statement).ok
+        assert engine.run(statement).ok
 
     got = queries.count_clearances_under_regulation("870.5150")
     assert got["total"] == 1, (
@@ -154,7 +220,7 @@ def test_a_product_code_with_no_regulation_is_found_not_missing(loaded_engine):
     Measured against the loaded graph before the fix: 902 product codes carry
     no regulation number, so the first case is common rather than theoretical.
     """
-    unregulated = queries.run(
+    unregulated = engine.run(
         "CREATE (p:ProductCode {product_code: 'NOREG', device_class: '3', "
         "definition: 'No regulation published', source: 'test'})")
     assert unregulated.ok, unregulated.error
@@ -184,7 +250,7 @@ def test_a_class_is_counted_whole_not_only_its_regulated_part(loaded_engine):
         "MATCH (p:ProductCode {product_code: 'CLSA'}), "
         "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
     ):
-        assert queries.run(statement).ok
+        assert engine.run(statement).ok
 
     out = queries.product_codes_by_class("9", limit=100)
     codes = {r["product_code"] for r in out["product_codes"]}
@@ -206,7 +272,7 @@ def test_a_clearance_whose_category_is_unregulated_is_still_found(loaded_engine)
         "MATCH (s:Submission {id: 'K999777'}), (p:ProductCode {product_code: 'UNREG'}) "
         "CREATE (s)-[:CLASSIFIED_AS]->(p)",
     ):
-        assert queries.run(statement).ok
+        assert engine.run(statement).ok
 
     real = queries.regulation_for_clearance("K999777")
     absent = queries.regulation_for_clearance("K000000")

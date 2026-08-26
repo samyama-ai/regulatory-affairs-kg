@@ -6,8 +6,13 @@ are used by both files, and a second copy of a fixture is how two test modules
 end up describing different graphs while both pass.
 """
 
+import ast
+import json
 import os
+import pathlib
 import urllib.request
+
+from mcp_server import engine
 
 
 def configured_test_url() -> str | None:
@@ -48,3 +53,58 @@ FIXTURE = [
     "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DXY'}) "
     "CREATE (s)-[:CLASSIFIED_AS]->(p)",
 ]
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def server_tools() -> tuple[str, ...]:
+    """`TOOLS` as `server.py` declares it, read without importing the module.
+
+    `mcp_server/server.py` imports `fastmcp`, which is an optional extra and
+    is not installed for this suite — the whole point of keeping the queries
+    in a module with no MCP dependency. So the tuple is parsed out of the
+    source rather than imported.
+    """
+    tree = ast.parse((ROOT / "mcp_server" / "server.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "TOOLS" for t in node.targets):
+            return tuple(el.value for el in node.value.elts)
+    raise AssertionError("server.py no longer declares a TOOLS tuple")
+
+
+def queries_that_run() -> set[str]:
+    """Every public function in `queries.py` that sends a query.
+
+    Discovered, not listed: a list here would be the fourth copy of the same
+    eight names, and the drift being guarded is precisely a name that exists
+    in one place and not another.
+    """
+    source = (ROOT / "mcp_server" / "queries.py").read_text()
+    tree = ast.parse(source)
+    found = set()
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+            continue
+        if node.name == "run":
+            continue  # the transport itself, not a tool
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and getattr(inner.func, "id", None) == "run":
+                found.add(node.name)
+                break
+    return found
+
+
+def serve(monkeypatch, payload):
+    """Make the engine answer with `payload`, without an engine.
+
+    Shared because both MCP test modules fake the same transport, and a
+    second copy is how two test files end up faking different engines
+    while both pass.
+    """
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(payload).encode()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())

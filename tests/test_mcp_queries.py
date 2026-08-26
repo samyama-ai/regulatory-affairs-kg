@@ -1,43 +1,42 @@
-"""The MCP queries, tested without an MCP dependency.
+"""The MCP queries, tested WITHOUT an engine and without an MCP dependency.
 
 The previous version of this server declared two tools and returned `[]` from
 both. So the thing worth testing is not that a tool exists — it is that it runs
 a traversal against the engine and can tell an empty answer from a broken one.
 
-The engine-backed tests load a handful of fixture nodes into a FRESH instance
-and assert the traversals return them.
+Everything here is pure: argument handling, the literal encoder, where the
+server points, and the shape of the Cypher each tool builds. Nothing in this
+file reaches an engine, so nothing in it skips.
 
-**They require `SAMYAMA_TEST_URL`, deliberately.** They do not fall back to
-`SAMYAMA_URL` and they do not default to port 8080 — because 8080 is where a
-demo engine runs, and `DETACH DELETE` against a loaded graph breaks MERGE-key
-equality permanently while leaving the node count untouched (DATASET-CARD.md,
-known issue 10; demo/README.md).
+**The engine-backed tests live in `tests/test_mcp_live.py`**, split out when
+this file passed the 500-line review limit. `SAMYAMA_TEST_URL` and
+`SAMYAMA_REQUIRE_ENGINE` belong to that file and are read nowhere in this one —
+this docstring described them for several rounds after the split, and told the
+reader to run
 
-The first draft of this file did default to 8080 and ran straight into a loaded
-graph. Nothing was damaged — the teardown is scoped to `source = 'test'` — but
-the docstring warned against exactly what the code invited, so the separate
-variable is the fix rather than a louder warning.
+    SAMYAMA_TEST_URL=... pytest tests/test_mcp_queries.py
 
-    docker run --rm -p 8111:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-    SAMYAMA_TEST_URL=http://localhost:8111 pytest tests/test_mcp_queries.py
-
-`SAMYAMA_REQUIRE_ENGINE=1` turns the skip into a failure, for CI.
+which sets a variable this file ignores and runs no engine test at all. Run
+`tests/test_mcp_live.py` for those; its own docstring carries the invocation
+and the reason it refuses to default to port 8080.
 """
 
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 
-import pytest
+import ast
+import inspect
+import textwrap
 
-from mcp_server import queries
+from mcp_server import engine, queries
+from tests.mcp_support import queries_that_run, server_tools
 
-TOOLS = ("clearances_under_regulation", "count_clearances_under_regulation",
-         "regulations_for_product", "regulation_for_clearance",
-         "busiest_regulations", "clearances_by_advisory_committee",
-         "product_codes_by_class", "graph_provenance")
+# Imported from the wiring, not restated. This file kept a third copy of the
+# same eight names — `queries.py` defines them, `server.py` registers them,
+# and the tests listed them again — so every check below was really a check
+# that this tuple matched itself.
+TOOLS = server_tools()
 
 
 # --------------------------------------------------------------------------
@@ -48,22 +47,54 @@ def test_no_query_is_a_stub():
     """The defect this file exists for: two tools that returned `[]` with a
     TODO where the traversal should be. A body that runs no query is the
     regression to catch."""
-    import inspect
+    # Parsed, not string-scanned. `"run(" in source` matched the word inside a
+    # docstring or a comment, and `"return []" not in source` is a negative
+    # substring assertion — the false-negative trap, satisfied by writing
+    # `return list()` or `return []  # noqa`. Both passed for a stub that
+    # merely mentioned the right words.
     for name in TOOLS:
-        source = inspect.getsource(getattr(queries, name))
-        assert "run(" in source, f"{name} runs no query"
-        assert "TODO" not in source, f"{name} still carries a TODO"
-        assert "return []" not in source, f"{name} returns a bare empty list"
+        function = getattr(queries, name)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+
+        calls_run = any(
+            isinstance(node, ast.Call) and getattr(node.func, "id", None) == "run"
+            for node in ast.walk(tree))
+        assert calls_run, f"{name} does not call run() — it sends no query"
+
+        returns_empty = any(
+            isinstance(node, ast.Return)
+            and isinstance(node.value, (ast.List, ast.Dict, ast.Set))
+            and not getattr(node.value, "elts", getattr(node.value, "keys", [1]))
+            for node in ast.walk(tree))
+        assert not returns_empty, (
+            f"{name} has a `return []` — the exact stub this file exists to "
+            f"stop coming back")
+
+        assert "TODO" not in inspect.getsource(function), f"{name} carries a TODO"
 
 
 def test_every_query_is_registered_as_a_tool():
     """A query added to queries.py and forgotten in server.py is silently
-    unavailable to an agent — the failure has no symptom without this."""
-    import pathlib
-    wiring = (pathlib.Path(__file__).resolve().parents[1]
-              / "mcp_server" / "server.py").read_text()
-    for name in TOOLS:
-        assert f'"{name}"' in wiring, f"{name} is not registered in server.py"
+    unavailable to an agent — the failure has no symptom without this.
+
+    The direction matters, and the previous version had it backwards. It
+    iterated a hardcoded tuple in this file and asserted each name appeared in
+    `server.py`, so a query added to `queries.py` and forgotten in BOTH places
+    passed — which is the only way it gets forgotten. `register()`'s docstring
+    claimed such a query "fails a test"; it did not.
+
+    The expected set is derived from `queries.py` instead: every public
+    function that runs a query. Nothing here is written twice, so nothing can
+    agree with itself.
+    """
+    discovered = queries_that_run()
+    registered = set(server_tools())
+
+    assert discovered == registered, (
+        f"queries.py and server.py disagree about the tool list. "
+        f"In queries.py and not registered: {sorted(discovered - registered)}. "
+        f"Registered but not a query: {sorted(registered - discovered)}.")
+    assert discovered, "no query functions were discovered — the parse is broken"
 
 
 def test_pending_by_authority_is_gone_and_the_reason_recorded():
@@ -74,60 +105,6 @@ def test_pending_by_authority_is_gone_and_the_reason_recorded():
     text = queries.__doc__ or ""
     assert "pending_by_authority" in text
     assert "decided" in text.lower()
-
-
-def test_an_unreachable_engine_is_an_error_not_an_empty_result(monkeypatch):
-    """An agent cannot act on `[]` if it means both "no clearances" and "the
-    engine is down"."""
-    monkeypatch.setattr(queries.urllib.request, "urlopen",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            urllib.error.URLError("connection refused")))
-    got = queries.clearances_under_regulation("870.5150")
-    assert got["error"] is not None
-    assert got["clearances"] == []
-
-
-def test_a_500_is_not_reported_as_a_missing_engine(monkeypatch):
-    """HTTPError subclasses URLError, so catching URLError first turns a 500
-    from a running engine into "no engine" — which sends someone to restart a
-    container that is already up."""
-    import io
-    monkeypatch.setattr(queries.urllib.request, "urlopen",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            urllib.error.HTTPError("u", 500, "boom", {}, io.BytesIO(b"bad"))))
-    error = queries.busiest_regulations()["error"]
-    assert "500" in error and "no engine" not in error
-
-
-def test_a_rejected_query_is_an_error_not_an_empty_result(monkeypatch):
-    """The engine answers 200 with an `error` key for a parse failure."""
-    serve(monkeypatch, {"error": "Parse error: unexpected token"})
-    got = queries.regulations_for_product("DXY")
-    assert got["error"] and "rejected" in got["error"]
-
-
-def test_a_genuinely_empty_answer_has_no_error(monkeypatch):
-    serve(monkeypatch, {"columns": ["cfr_section"], "records": []})
-    got = queries.regulations_for_product("NOSUCH")
-    assert got["error"] is None
-    assert got["regulations"] == []
-    assert got["count"] == 0
-
-
-def serve(monkeypatch, payload):
-    class R:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return json.dumps(payload).encode()
-    monkeypatch.setattr(queries.urllib.request, "urlopen", lambda *a, **k: R())
-
-
-def test_rows_are_returned_as_named_fields(monkeypatch):
-    """Columns and records arrive separately; an agent needs them joined."""
-    serve(monkeypatch, {"columns": ["clearance", "device"],
-                        "records": [["K233820", "A scanner"]]})
-    rows = queries.clearances_under_regulation("870.5150")["clearances"]
-    assert rows == [{"clearance": "K233820", "device": "A scanner"}]
 
 
 def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
@@ -162,7 +139,7 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
                   "records": [[f"K{n:06d}"] for n in range(25)]})
         return R()
 
-    monkeypatch.setattr(queries.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(engine.urllib.request, "urlopen", urlopen)
 
     listed = queries.clearances_under_regulation("870.5150", limit=25)
     total = queries.count_clearances_under_regulation("870.5150")
@@ -174,42 +151,13 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
         "radius — the one number this graph exists to get right")
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("870.5150", chr(34) + "870.5150" + chr(34)),
-    ("O'Brien", chr(34) + "O'Brien" + chr(34)),
-    ("back\\slash", chr(34) + "back\\slash" + chr(34)),
-    ('say "hi"', chr(39) + 'say "hi"' + chr(39)),
-])
-def test_a_literal_is_quoted_by_choosing_a_delimiter_not_by_escaping(value, expected):
-    """1.1.0 has NO escape sequences inside a literal, so the delimiter is
-    chosen per value rather than the quote being escaped.
-
-    These expectations used to assert the backslash form. That is why they
-    passed while the engine rejected the statement: they compared
-    `quoted()`'s output against itself, and the one thing neither of them
-    consulted was the engine. Measured against 1.1.0 — the old form returns
-    HTTP 400, this one parses.
-    """
-    assert queries.quoted(value) == expected
-
-
-def test_an_integer_is_matched_as_the_text_it_is_stored_as():
-    """`lit()` emits numbers unquoted, correctly — the engine keeps the type.
-    But every value these tools compare against is stored as TEXT, including
-    `device_class`, measured as "1", "2", "3" and "N" on the loaded graph. An
-    int reaching the encoder would render `2`, match nothing, and say so in no
-    way at all."""
-    assert queries.quoted(2) == chr(34) + "2" + chr(34)
-    assert queries.quoted("2") == chr(34) + "2" + chr(34)
-
-
 def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
     sent = []
     class R:
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self): return b'{"columns": [], "records": []}'
-    monkeypatch.setattr(queries.urllib.request, "urlopen",
+    monkeypatch.setattr(engine.urllib.request, "urlopen",
                         lambda rq, *a, **k: (sent.append(json.loads(rq.data)["query"]), R())[1])
     queries.regulations_for_product("' RETURN 1 //")
     cypher = sent[0]
@@ -220,42 +168,6 @@ def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
     payload = chr(34) + "' RETURN 1 //" + chr(34)
     assert payload in cypher, "the payload is not inside one literal: " + cypher
     assert cypher.rstrip().endswith("specialty"), "query truncated: " + cypher[-60:]
-
-
-def test_the_environment_wins_over_the_config(monkeypatch):
-    monkeypatch.setenv("SAMYAMA_URL", "http://elsewhere:9999/")
-    assert queries.engine_url() == "http://elsewhere:9999"
-
-
-def test_the_config_file_is_read_when_the_environment_is_silent(monkeypatch):
-    """Against the VALUES in mcp_server/config.yaml, not the shape of a URL.
-
-    `startswith("http://")` is satisfied by `DEFAULT_URL` too, so this passed
-    with the entire config-parsing branch deleted — a test of nothing, in the
-    code that decides where the server points.
-    """
-    monkeypatch.delenv("SAMYAMA_URL", raising=False)
-    assert queries.engine_url() == "http://127.0.0.1:8080"
-
-
-def test_a_host_outside_the_graph_block_does_not_repoint_the_server(monkeypatch, tmp_path):
-    """The parser matched a bare `host:`/`port:` under ANY section, so it
-    worked by luck — `config.yaml` happens to declare them only under `graph:`.
-    Someone adding `server.host` later would have silently repointed the MCP
-    server at something that is not the graph."""
-    home = tmp_path / "mcp_server"
-    home.mkdir()
-    # `graph:` FIRST and `server:` second, deliberately. With the sections
-    # reversed a last-wins parser lands on the right answer by accident, which
-    # is how the first version of this test passed against the very parser it
-    # was written to catch.
-    (home / "config.yaml").write_text(
-        "graph:\n  host: 127.0.0.1\n  port: 8080\n"
-        "server:\n  host: 10.0.0.1\n  port: 9999\n")
-    monkeypatch.delenv("SAMYAMA_URL", raising=False)
-    monkeypatch.setattr(queries, "__file__", str(home / "queries.py"))
-    assert queries.engine_url() == "http://127.0.0.1:8080", (
-        "a host declared outside the graph block repointed the server")
 
 
 def test_every_limited_query_orders_before_it_limits():
@@ -306,62 +218,9 @@ def test_a_reverse_lookup_of_a_non_string_is_an_error_not_an_attribute_error():
     assert got["found"] is False
 
 
-def test_an_engine_error_that_is_not_a_string_is_still_reported(monkeypatch):
-    """`payload['error'][:200]` assumes a string. A dict slices to something
-    unreadable and an int raises TypeError — inside the error path, which is
-    the one place that must not fail."""
-    class R:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return json.dumps({"error": {"code": 42, "detail": "nope"}}).encode()
-
-    monkeypatch.setattr(queries.urllib.request, "urlopen", lambda *a, **k: R())
-    got = queries.busiest_regulations()
-    assert got["error"] and "42" in got["error"], got
-
-
-def test_a_config_value_with_a_comment_or_quotes_is_read_cleanly(monkeypatch, tmp_path):
-    """An inline `# comment` and surrounding quotes are ordinary YAML.
-    Unstripped, `host: 127.0.0.1  # local` became a hostname ending in
-    "# local" — a URL the engine never answers, and no error saying why."""
-    home = tmp_path / "mcp_server"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        'graph:\n  host: "127.0.0.1"  # local docker\n  port: 8080  # default\n')
-    monkeypatch.delenv("SAMYAMA_URL", raising=False)
-    monkeypatch.setattr(queries, "__file__", str(home / "queries.py"))
-    assert queries.engine_url() == "http://127.0.0.1:8080"
-
-
 # --------------------------------------------------------------------------
 # a term the engine cannot express is an error, not an empty answer
 # --------------------------------------------------------------------------
-
-
-def test_a_term_holding_both_quote_characters_is_refused_not_altered():
-    """`lit()` substitutes a typographic quote when a value holds both `'` and
-    `"`, because 1.1.0 can express neither. Writing a value that way is a
-    recorded compromise the loader reports. MATCHING on one is not: the term
-    compared against is no longer the term asked for, so the query returns no
-    rows and no error.
-
-    That is a third meaning inside the same empty list — this module's own
-    docstring names two and exists to keep them apart.
-    """
-    with pytest.raises(queries.Unbounded, match="cannot be matched exactly"):
-        queries.quoted('Governor\'s "Special" Device')
-
-
-def test_a_term_with_only_one_quote_kind_still_works():
-    """The fix must not refuse what 1.1.0 CAN express — an apostrophe alone is
-    the common case and `lit()` handles it by choosing the other delimiter."""
-    assert queries.quoted("O'Brien") == '"O\'Brien"'
-    assert queries.quoted('say "hi"') == "'say \"hi\"'"
 
 
 def test_the_refusal_reaches_the_caller_as_an_error_not_a_traceback():
@@ -370,39 +229,6 @@ def test_the_refusal_reaches_the_caller_as_an_error_not_a_traceback():
     out = queries.regulations_for_product('a\'b"c')
     assert out["error"] and "cannot be matched exactly" in out["error"]
     assert out["regulations"] == [] and out["found"] is False
-
-
-def test_refusing_a_term_does_not_grow_the_sanitised_record():
-    """`etl.cypher.SANITISED` is a module-level list nothing trims, and an MCP
-    server is a long-lived process — the loader calls `reset()` at the start of
-    a run and the server never does.
-
-    Every entry this path would add is one `quoted()` is about to refuse and
-    report, so dropping it loses nothing. A list that only grows, in a process
-    that only runs, holding records nobody reads, is a leak.
-    """
-    from etl.cypher import SANITISED
-    before = len(SANITISED)
-    for _ in range(50):
-        with pytest.raises(queries.Unbounded):
-            queries.quoted('a\'b"c')
-    assert len(SANITISED) == before, (
-        f"SANITISED grew by {len(SANITISED) - before} across 50 refused calls")
-
-
-def test_a_limit_above_the_ceiling_is_refused():
-    """`bounded()` had a floor and no ceiling, so `limit=10**9` rendered
-    `LIMIT 1000000000` — a real request against a real engine, from a tool an
-    agent calls unprompted and can pass any number to."""
-    with pytest.raises(queries.Unbounded, match="at most"):
-        queries.bounded(10 ** 9)
-    assert queries.bounded(queries.CEILING) == queries.CEILING
-
-
-def test_the_ceiling_is_above_every_label_in_the_graph():
-    """A ceiling that could truncate a real answer would be worse than none.
-    Submission is the largest label at 19,127."""
-    assert queries.CEILING > 19_127
 
 
 def test_no_tool_raises_when_a_term_cannot_be_expressed():
@@ -418,14 +244,25 @@ def test_no_tool_raises_when_a_term_cannot_be_expressed():
     """
     import inspect
 
+    # Every parameter these tools compare against as TEXT, and therefore every
+    # one that reaches `quoted()`. Named in one set rather than split across
+    # two clauses joined by `or`: `and` binds tighter, so the previous spelling
+    # read as `(A and B and C) or (A and B and D)` — the same test written
+    # twice, where the second copy silently carried the whole condition.
+    # Verified to select the same five tools.
+    TEXT_ARGUMENTS = {"cfr_section", "product_code", "k_number", "device_class"}
+
     bad = 'a\'b"c'
     tools = [f for name, f in vars(queries).items()
-             if inspect.isfunction(f) and not name.startswith("_")
-             and "cfr_section" in inspect.signature(f).parameters
-             or (inspect.isfunction(f) and not name.startswith("_")
-                 and {"product_code", "k_number", "device_class"}
-                 & set(inspect.signature(f).parameters))]
+             if inspect.isfunction(f)
+             and not name.startswith("_")
+             and TEXT_ARGUMENTS & set(inspect.signature(f).parameters)]
     assert tools, "no tools found to check — this would pass vacuously"
+    assert len(tools) == 5, (
+        f"expected the five tools that take a text argument, got "
+        f"{sorted(f.__name__ for f in tools)} — if a tool was added or its "
+        f"parameter renamed, extend TEXT_ARGUMENTS rather than letting the "
+        f"selection shrink silently")
 
     for tool in tools:
         try:

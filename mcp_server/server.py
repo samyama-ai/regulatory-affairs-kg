@@ -2,9 +2,10 @@
 
     python -m mcp_server.server
 
-Wiring only. Every query lives in `mcp_server/queries.py`, which has no MCP
-dependency — so the traversals are testable without `fastmcp` installed, and a
-query can be read without the tool decorators around it.
+Wiring only. The traversals live in `mcp_server/queries.py` and the transport
+in `mcp_server/engine.py`, neither of which has an MCP dependency — so a query
+is testable without `fastmcp` installed, and readable without the tool
+decorators around it.
 
 What the loader builds, and therefore the ceiling on this server:
 
@@ -38,6 +39,11 @@ def register(server) -> None:
     Registered by name rather than by eight decorators, so a query added to
     queries.py and forgotten here fails a test rather than being silently
     unavailable to an agent.
+
+    That was not true until this round. The guarding test iterated its own
+    hardcoded copy of this tuple, so a query missing from BOTH files passed —
+    which is the only way it goes missing. The test derives the expected set
+    from queries.py now, so the sentence above is checkable.
 
     In a function, not a bare module-level loop: the loop variable outlived it
     and sat in the module namespace, where `getattr`-style introspection picks
