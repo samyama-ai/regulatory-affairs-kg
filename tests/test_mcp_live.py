@@ -13,9 +13,45 @@ no engine is reachable.
 
 from __future__ import annotations
 import os
+import urllib.parse
 import pytest
 from mcp_server import engine, queries
 from tests.mcp_support import FIXTURE, configured_test_url, engine_available
+
+
+# What this fixture writes, with headroom. The teardown re-checks emptiness and
+# at that point the graph legitimately holds the fixture, so the second check
+# allows that much and nothing more.
+FIXTURE_CEILING = 64
+
+
+def held_or_fail(context: str, allow: int = 0) -> None:
+    """Refuse unless the engine is empty — and refuse when it cannot be asked.
+
+    `engine.run()` returns `Result(rows=[], error=...)` on any failure, so
+    `.rows[0]` was never reached and the count fell through to 0: an errored
+    probe read as "the engine is empty". One HTTP 500 between here and a loaded
+    graph — a restarting container, a proxy hiccup, a timeout under load — and
+    the unconditional teardown wipes it, behind a passing test. Reproduced with
+    a proxy returning 500 for the first query: five nodes before, one test
+    passed, zero nodes after.
+
+    So a count that cannot be READ is treated as NOT empty. It is the same
+    unchecked-`Result` pattern the fixture loads were fixed for, and the
+    teardown's own "was it left clean" check had it too.
+    """
+    probe = engine.run("MATCH (n) RETURN count(n) AS n")
+    if not probe.ok or not probe.rows:
+        pytest.fail(
+            f"{context}, and the node count could not be read — so this run "
+            f"cannot confirm the engine is safe to write to and delete from: "
+            f"{probe.error}")
+    held = probe.rows[0]["n"]
+    if held > allow:
+        pytest.fail(
+            f"{context} and it holds {held:,} nodes. These tests write and "
+            f"DETACH DELETE; run them against a fresh instance. "
+            f"See DATASET-CARD.md issue 10.")
 
 
 @pytest.fixture
@@ -31,13 +67,14 @@ def loaded_engine(monkeypatch):
     # Point the queries at the test engine only for the duration of the test.
     monkeypatch.setenv("SAMYAMA_URL", url)
 
-    before = engine.run("MATCH (n) RETURN count(n) AS n").rows
-    existing = before[0]["n"] if before else 0
-    if existing:
+    # Refused before anything is read. The README says never port 8080 because
+    # that is where a demo engine runs; advisory prose is not a guard.
+    if (urllib.parse.urlparse(url).port or 80) == 8080:
         pytest.fail(
-            f"SAMYAMA_TEST_URL points at an engine holding {existing:,} nodes. "
-            f"These tests write and DETACH DELETE; run them against a fresh "
-            f"instance. See DATASET-CARD.md issue 10.")
+            f"SAMYAMA_TEST_URL is {url}. Port 8080 is where a demo engine runs, "
+            f"and these tests DETACH DELETE. Use a different port.")
+
+    held_or_fail(f"SAMYAMA_TEST_URL points at {url}")
 
     # Every load is checked. An unchecked `run()` returning an error left the
     # graph half-built, and the first assertion in the test then failed with
@@ -71,10 +108,17 @@ def loaded_engine(monkeypatch):
         # run at all unless the engine holds zero nodes. Given that, deleting
         # everything is exactly what "remove what this fixture wrote" means —
         # and it does not rest on a WHERE clause this engine gets wrong.
+        # Re-probed immediately before the delete, not only at setup. An engine
+        # restarted or repointed mid-run would otherwise take an unconditional
+        # delete against something nothing ever checked.
+        held_or_fail("the engine changed under this test", allow=FIXTURE_CEILING)
         engine.run("MATCH (n) DETACH DELETE n")
 
-        left = engine.run("MATCH (n) RETURN count(n) AS n").rows
-        remaining = left[0]["n"] if left else 0
+        left = engine.run("MATCH (n) RETURN count(n) AS n")
+        assert left.ok and left.rows, (
+            f"the teardown could not confirm the engine was left clean: "
+            f"{left.error}")
+        remaining = left.rows[0]["n"]
         assert not remaining, (
             f"{remaining:,} node(s) survived the teardown, so the next run "
             f"will fail on the emptiness guard instead of here.")
@@ -256,8 +300,11 @@ def test_a_class_is_counted_whole_not_only_its_regulated_part(loaded_engine):
     codes = {r["product_code"] for r in out["product_codes"]}
     assert codes == {"CLSA", "CLSB"}, (
         f"the unregulated product code was dropped: {sorted(codes)}")
-    assert out["count"] == 2
-    assert out["unregulated"] == 1, "the caller is not told how many carry no regulation"
+    # `rows_returned`, not `count`: the key was renamed because it is the size
+    # of the PAGE, and the tool's docstring table is about whole classes. With
+    # the default limit of 25 a `count` of 25 said nothing about the class.
+    assert out["rows_returned"] == 2
+    assert out["unregulated_in_page"] == 1, "the caller is not told how many carry no regulation"
 
 
 def test_a_clearance_whose_category_is_unregulated_is_still_found(loaded_engine):
@@ -281,3 +328,67 @@ def test_a_clearance_whose_category_is_unregulated_is_still_found(loaded_engine)
     assert real["governed_by"][0]["cfr_section"] is None, (
         "its category carries no regulation, which is a fact, not an absence")
     assert absent["found"] is False
+
+
+def test_the_product_code_join_reaches_the_same_rule_the_clearance_names(loaded_engine):
+    """The equivalence the tool's contract now rests on, asserted rather than
+    assumed.
+
+    `clearances_under_regulation` joins Regulation <- ProductCode <- Submission.
+    The clearance record ALSO carries `regulation_number`, and the loader writes
+    it. On the loaded graph the two agree for all 19,127 clearances, but that is
+    a property of the data: a clearance whose product code carries no regulation
+    edge would be invisible to the traversal, and the tool would understate
+    blast radius with `error: None`.
+
+    So the fixture builds exactly that case and checks it is caught.
+    """
+    # The happy path: the fixture's clearance carries the same rule both ways.
+    got = queries.clearances_under_regulation("870.5150")
+    assert got["error"] is None
+    reached = {row["clearance"] for row in got["clearances"]}
+    assert "K999001" in reached
+
+    for statement in (
+        "MATCH (s:Submission {id: 'K999001'}) RETURN s.regulation_number AS r",
+    ):
+        probe = engine.run(statement)
+        assert probe.ok, probe.error
+        assert probe.rows[0]["r"] == "870.5150", (
+            "the fixture clearance names a different rule than the traversal "
+            "reaches — the two joins have diverged")
+
+    # Now the case the traversal cannot see: a clearance stamped with the rule
+    # whose product code has no GOVERNED_BY edge at all.
+    for statement in (
+        "CREATE (p:ProductCode {product_code: 'ORPH', device_class: '2', "
+        "source: 'test'})",
+        "CREATE (s:Submission {id: 'K999003', device_name: 'Orphan', "
+        "applicant: 'Acme', decision_date: '2024-03-04', "
+        "regulation_number: '870.5150', advisory_committee: 'Cardiovascular', "
+        "source: 'test'})",
+        "MATCH (s:Submission {id: 'K999003'}), (p:ProductCode {product_code: 'ORPH'}) "
+        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
+    ):
+        assert engine.run(statement).ok
+
+    after = queries.clearances_under_regulation("870.5150")
+    assert after["error"] is None
+    still_reached = {row["clearance"] for row in after["clearances"]}
+    assert "K999003" not in still_reached, (
+        "the traversal returned a clearance whose product code has no "
+        "regulation edge — the query changed shape and this test is stale")
+
+    # That is the documented limit, and this is the assertion that fails the
+    # day real data contains one: no clearance may name a rule the traversal
+    # cannot reach for it.
+    orphans = engine.run(
+        "MATCH (s:Submission) WHERE s.source <> 'test' AND "
+        "NOT EXISTS { MATCH (s)-[:CLASSIFIED_AS]->()-[:GOVERNED_BY]->() } "
+        "RETURN count(s) AS c")
+    assert orphans.ok, orphans.error
+    assert orphans.rows[0]["c"] == 0, (
+        f"{orphans.rows[0]['c']} clearances carry a regulation_number that the "
+        f"product-code traversal cannot reach, so clearances_under_regulation "
+        f"now understates blast radius by that many. The docstring's measured "
+        f"claim of 0 is stale.")

@@ -46,11 +46,34 @@ from mcp_server.engine import Unbounded, bounded, quoted, run
 def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
     """Every clearance governed by one 21 CFR section.
 
-    The change-impact query: a rule changes, and this is what is affected. Two
-    hops, because `regulation_number` is on the clearance record itself — an
-    exact government-issued join, not a name match.
+    The change-impact query: a rule changes, and this is what is affected.
+
+    **The join runs through the product code**, not through the clearance's own
+    `regulation_number`. The text here used to claim the latter — "an exact
+    government-issued join" — and the query never touched that property. Both
+    are exact joins on government-issued codes, but they are different paths,
+    and a clearance whose product code carries no `GOVERNED_BY` edge is
+    invisible to this one.
+
+    Measured on the loaded graph rather than assumed: all 19,127 Submissions
+    are reachable this way, and for every one of them the regulation the
+    traversal reaches is the same as the `regulation_number` on the record —
+    **0 disagreements**. So the two paths are equivalent here today. 902
+    ProductCodes carry no regulation edge, but no Submission classifies as one
+    of them, which is why the gap is zero rather than small.
+
+    That equivalence is a property of the DATA and not of this query, so
+    `tests/test_mcp_live.py` asserts it: the day a clearance arrives whose
+    product code is unregulated, this tool starts understating blast radius and
+    the suite says so instead of the answer quietly shrinking.
+
+    Returns `clearance`, `device`, `applicant`, `decided`, `product_code`;
+    `count` is the number of rows RETURNED, capped by `limit` — use
+    `count_clearances_under_regulation` for the total.
 
     cfr_section: e.g. "870.5150"
+    limit: rows to return, 1..50,000, default 25. A bad value returns `error`
+        rather than a silently rounded number.
     """
     # `quoted()` inside the try as well as `bounded()`. Both refuse an
     # argument this module will not send, both raise `Unbounded`, and an agent
@@ -70,10 +93,30 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
         f"RETURN s.id AS clearance, s.device_name AS device, "
         f"s.applicant AS applicant, s.decision_date AS decided, "
         f"p.product_code AS product_code "
-        f"ORDER BY s.decision_date DESC LIMIT {rows_wanted}"
+        # Two keys, because `decision_date` is not unique: many clearances share
+        # a date, so a single-key ORDER BY leaves LIMIT free to return a
+        # different subset each call. An agent comparing two calls sees a change
+        # that did not happen.
+        f"ORDER BY s.decision_date DESC, s.id LIMIT {rows_wanted}"
     )
-    return {"cfr_section": cfr_section, "clearances": result.rows,
-            "count": len(result.rows), "error": result.error}
+    # Deduplicated HERE, not with `RETURN DISTINCT`. Measured on 1.1.0:
+    # `RETURN DISTINCT` is a silent no-op — two identical rows go in, two come
+    # back. So the obvious fix would have looked like a fix and changed
+    # nothing, while `count_clearances_under_regulation` genuinely uses
+    # `count(DISTINCT s)`. The two would then disagree, with the listing longer.
+    #
+    # A Submission reaches a Regulation once per product code it classifies as,
+    # so the duplicate is real whenever a device carries two codes under one
+    # rule.
+    seen, clearances = set(), []
+    for row in result.rows:
+        if row.get("clearance") in seen:
+            continue
+        seen.add(row.get("clearance"))
+        clearances.append(row)
+
+    return {"cfr_section": cfr_section, "clearances": clearances,
+            "count": len(clearances), "error": result.error}
 
 
 def count_clearances_under_regulation(cfr_section: str) -> dict:
@@ -190,7 +233,7 @@ def busiest_regulations(limit: int = 10) -> dict:
         # zero regulations where the two counts differ — so this is correct by
         # construction rather than by a property of today's data.
         f"RETURN r.cfr_section AS cfr_section, count(DISTINCT s) AS clearances "
-        f"ORDER BY clearances DESC LIMIT {rows_wanted}"
+        f"ORDER BY clearances DESC, r.cfr_section LIMIT {rows_wanted}"
     )
     return {"regulations": result.rows, "count": len(result.rows),
             "error": result.error}
@@ -213,7 +256,9 @@ def clearances_by_advisory_committee(limit: int = 15) -> dict:
     result = run(
         f"MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL "
         f"RETURN s.advisory_committee AS committee, count(s) AS clearances "
-        f"ORDER BY clearances DESC LIMIT {rows_wanted}"
+        # Secondary key: counts tie, and a single-key ORDER BY leaves LIMIT
+        # free to return a different subset on each call.
+        f"ORDER BY clearances DESC, s.advisory_committee LIMIT {rows_wanted}"
     )
     return {"committees": result.rows, "count": len(result.rows),
             "error": result.error}
@@ -238,7 +283,7 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         N                 383                   1       382
 
     Class III lost 73% of its answer, silently, under a count the caller reads
-    as complete. `benchmarks/run_queries.py` already found this and renamed its
+    as complete. The benchmark suite already found this and renamed its
     own query `class_three_with_a_regulation` to say so; this tool kept the
     join and the misleading name.
 
@@ -251,7 +296,7 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         where = quoted(device_class)
     except Unbounded as exc:
         return {"device_class": device_class, "product_codes": [], "count": 0,
-                "unregulated": 0, "error": str(exc)}
+                "unregulated_in_page": 0, "error": str(exc)}
 
     result = run(
         f"MATCH (p:ProductCode) WHERE p.device_class = {where} "
@@ -264,25 +309,64 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         f"ORDER BY p.product_code LIMIT {rows_wanted}"
     )
     return {"device_class": device_class, "product_codes": result.rows,
-            "count": len(result.rows),
-            "unregulated": sum(1 for r in result.rows if r.get("cfr_section") is None),
+            # `rows_returned`, not `count`: this is the size of the PAGE, and
+            # the docstring's table is about whole classes. With the default
+            # limit of 25, a `count` of 25 says nothing about the class.
+            "rows_returned": len(result.rows),
+            "unregulated_in_page": sum(1 for r in result.rows if r.get("cfr_section") is None),
             "error": result.error}
+
+
+# The labels this dataset is made of. Counted individually, because
+# `MATCH (n) RETURN count(n)` counts THE STORE and not this graph — see below.
+DATASET_LABELS = ("Submission", "ProductCode", "Regulation")
 
 
 def graph_provenance() -> dict:
     """What is in this graph and where it came from.
 
     The first question a reviewer asks before trusting any answer above, and
-    the one the demo opens with. Every node carries the openFDA endpoint it was
-    built from.
+    the one the demo opens with.
+
+    **`nodes_in_store` is not this dataset.** It used to be reported as
+    `nodes`, from `MATCH (n) RETURN count(n)` — which counts everything the
+    engine holds. Pointed at an engine carrying an unrelated KG, this tool
+    reported **17,168 nodes** for a store with zero Submissions, zero
+    ProductCodes and zero Regulations, and the only hint was an empty
+    `by_source`. That is the one tool whose job is telling a reviewer what the
+    graph contains before they trust anything else.
+
+    Sending `graph` in the payload would not fix it: DATASET-CARD.md known
+    issue 7 records that 1.1.0 ignores the field. So the fix is to count what
+    this dataset is made of, by label, and to report the store total beside it
+    under a name that says what it is. An unrelated store now reads as zeros
+    with a non-zero `nodes_in_store`, which is the honest shape of "you have
+    pointed me at something else".
+
+    Returns `by_label`, `nodes` (this dataset), `nodes_in_store` (everything
+    the engine holds), `by_source`, and `error`.
     """
     totals = run("MATCH (n) RETURN count(n) AS nodes")
     # Early: the second query against an engine already known to be down is a
     # second round trip and a second timeout, for an answer we have.
     if not totals.ok:
-        return {"nodes": None, "by_source": [], "error": totals.error}
+        return {"nodes": None, "nodes_in_store": None, "by_label": [],
+                "by_source": [], "error": totals.error}
+
+    by_label, ours = [], 0
+    for label in DATASET_LABELS:
+        counted = run(f"MATCH (n:{label}) RETURN count(n) AS nodes")
+        if not counted.ok:
+            return {"nodes": None, "nodes_in_store": None, "by_label": [],
+                    "by_source": [], "error": counted.error}
+        held = counted.rows[0].get("nodes", 0) if counted.rows else 0
+        by_label.append({"label": label, "nodes": held})
+        ours += held
+
     sourced = run("MATCH (n) WHERE n.source IS NOT NULL "
                   "RETURN n.source AS source, count(n) AS nodes "
                   "ORDER BY nodes DESC")
-    return {"nodes": totals.rows[0].get("nodes") if totals.rows else None,
+    return {"nodes": ours,
+            "nodes_in_store": totals.rows[0].get("nodes") if totals.rows else None,
+            "by_label": by_label,
             "by_source": sourced.rows, "error": sourced.error}

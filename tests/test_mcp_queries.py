@@ -29,6 +29,10 @@ import ast
 import inspect
 import textwrap
 
+import pytest
+
+from _pytest.outcomes import Failed
+
 from mcp_server import engine, queries
 from tests.mcp_support import queries_that_run, server_tools
 
@@ -37,6 +41,10 @@ from tests.mcp_support import queries_that_run, server_tools
 # and the tests listed them again — so every check below was really a check
 # that this tuple matched itself.
 TOOLS = server_tools()
+
+# Every parameter these tools compare against as TEXT, and therefore every
+# one that reaches `quoted()`. One set, not two clauses joined by `or`.
+TEXT_ARGUMENTS = {"cfr_section", "product_code", "k_number", "device_class"}
 
 
 # --------------------------------------------------------------------------
@@ -135,8 +143,15 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
         cypher = json.loads(request.data)["query"]
         served["payload"] = (
             {"columns": ["total"], "records": [[415]]} if "count(" in cypher
-            else {"columns": ["k_number"],
-                  "records": [[f"K{n:06d}"] for n in range(25)]})
+            # The REAL column aliases the query returns, not invented ones.
+            # This stub answered with `k_number` while the query aliases
+            # `clearance`, so every row read as the same (missing) id — which
+            # stayed invisible until the listing started deduplicating. A stub
+            # whose columns do not match the query cannot test the query.
+            else {"columns": ["clearance", "device", "applicant",
+                              "decided", "product_code"],
+                  "records": [[f"K{n:06d}", f"Device {n}", "Acme",
+                               "2024-01-02", "DXY"] for n in range(25)]})
         return R()
 
     monkeypatch.setattr(engine.urllib.request, "urlopen", urlopen)
@@ -250,19 +265,24 @@ def test_no_tool_raises_when_a_term_cannot_be_expressed():
     # read as `(A and B and C) or (A and B and D)` — the same test written
     # twice, where the second copy silently carried the whole condition.
     # Verified to select the same five tools.
-    TEXT_ARGUMENTS = {"cfr_section", "product_code", "k_number", "device_class"}
-
     bad = 'a\'b"c'
     tools = [f for name, f in vars(queries).items()
              if inspect.isfunction(f)
              and not name.startswith("_")
              and TEXT_ARGUMENTS & set(inspect.signature(f).parameters)]
     assert tools, "no tools found to check — this would pass vacuously"
-    assert len(tools) == 5, (
-        f"expected the five tools that take a text argument, got "
-        f"{sorted(f.__name__ for f in tools)} — if a tool was added or its "
-        f"parameter renamed, extend TEXT_ARGUMENTS rather than letting the "
-        f"selection shrink silently")
+    # Derived, not counted. `len(tools) == 5` deliberately failed when a tool
+    # was added, but its message asked the author to extend TEXT_ARGUMENTS —
+    # which is the manual-sync coupling the rest of this file was rewritten to
+    # remove. Every registered tool taking a text argument must be covered, and
+    # that set comes from the wiring.
+    covered = {f.__name__ for f in tools}
+    expected = {name for name in TOOLS
+                if TEXT_ARGUMENTS & set(inspect.signature(
+                    getattr(queries, name)).parameters)}
+    assert covered == expected, (
+        f"the sweep covers {sorted(covered)} but the registered tools taking a "
+        f"text argument are {sorted(expected)}")
 
     for tool in tools:
         try:
@@ -272,3 +292,153 @@ def test_no_tool_raises_when_a_term_cannot_be_expressed():
                 f"{tool.__name__} raised {type(exc).__name__} instead of "
                 f"returning an error: {exc}") from None
         assert out.get("error"), f"{tool.__name__} returned no error for {bad!r}"
+
+
+def test_an_unreadable_node_count_is_treated_as_a_graph_worth_protecting(monkeypatch):
+    """The guard that failed open, and the wipe behind it.
+
+    `engine.run()` returns `Result(rows=[], error=...)` on any failure, so the
+    live fixture's emptiness probe fell through to 0 and concluded the engine
+    was empty — and the teardown behind it is an unconditional
+    `MATCH (n) DETACH DELETE n`. Reproduced with a proxy returning 500 for one
+    query: five nodes before, the test passed, zero nodes after.
+
+    One flaky response between SAMYAMA_TEST_URL and a loaded graph was enough,
+    and the green result meant nobody looked.
+    """
+    from tests import test_mcp_live as live
+
+    monkeypatch.setattr(live.engine, "run",
+                        lambda cypher: engine.Result(error="engine returned 500"))
+    with pytest.raises(Failed, match="could not be read"):
+        live.held_or_fail("test")
+
+
+def test_a_populated_engine_is_still_refused(monkeypatch):
+    """The case the guard was always meant to catch, kept alongside the one it
+    missed — so a fix for the first cannot quietly disable the second."""
+    from tests import test_mcp_live as live
+
+    monkeypatch.setattr(live.engine, "run",
+                        lambda cypher: engine.Result(rows=[{"n": 17168}]))
+    with pytest.raises(Failed, match="17,168 nodes"):
+        live.held_or_fail("test")
+
+    # And an empty one passes, so the guard is not simply refusing everything.
+    monkeypatch.setattr(live.engine, "run",
+                        lambda cypher: engine.Result(rows=[{"n": 0}]))
+    live.held_or_fail("test")
+
+
+def test_provenance_reports_this_dataset_not_whatever_the_store_holds(monkeypatch):
+    """The tool whose job is telling a reviewer what the graph contains.
+
+    It reported `MATCH (n) RETURN count(n)` — the whole store. Pointed at an
+    engine carrying an unrelated KG it answered **17,168 nodes** for a store
+    with zero Submissions, zero ProductCodes and zero Regulations, and the only
+    hint was an empty `by_source`.
+
+    Sending `graph` would not fix it (1.1.0 ignores the field), so the dataset
+    is counted by label and the store total is reported beside it under a name
+    that says what it is.
+    """
+    answers = {
+        "MATCH (n) RETURN count(n) AS nodes": {"columns": ["nodes"], "records": [[17168]]},
+        "MATCH (n:Submission)": {"columns": ["nodes"], "records": [[0]]},
+        "MATCH (n:ProductCode)": {"columns": ["nodes"], "records": [[0]]},
+        "MATCH (n:Regulation)": {"columns": ["nodes"], "records": [[0]]},
+        "n.source IS NOT NULL": {"columns": ["source", "nodes"], "records": []},
+    }
+
+    class R:
+        def __init__(self, payload): self._p = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(self._p).encode()
+
+    def dispatch(request, *a, **k):
+        cypher = json.loads(request.data)["query"]
+        for needle, payload in answers.items():
+            if needle in cypher:
+                return R(payload)
+        raise AssertionError(f"no fixture answer for {cypher!r}")
+    monkeypatch.setattr(engine.urllib.request, "urlopen", dispatch)
+
+    got = queries.graph_provenance()
+    assert got["error"] is None
+    assert got["nodes"] == 0, (
+        "this dataset holds nothing, but the tool reported the store's count "
+        "as the dataset's — a reviewer reads that as a loaded graph")
+    assert got["nodes_in_store"] == 17168, (
+        "the store total is gone; a reader now cannot tell an empty engine "
+        "from one holding somebody else's graph")
+    assert {row["label"] for row in got["by_label"]} == {
+        "Submission", "ProductCode", "Regulation"}
+
+
+def test_provenance_survives_a_failed_second_query(monkeypatch):
+    """The two-query path had no behavioural test at all — replacing the body
+    with a hardcoded dict left the whole suite green, because the stub check
+    only looks for a literally empty return."""
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"error": "engine went away"}).encode()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())
+
+    got = queries.graph_provenance()
+    assert got["error"], "a failed count was reported as a successful answer"
+    assert got["nodes"] is None
+    assert got["nodes_in_store"] is None
+    assert got["by_label"] == []
+
+
+def test_a_clearance_under_two_product_codes_is_listed_once(monkeypatch):
+    """The listing and the count must count the same thing.
+
+    A Submission reaches a Regulation once per product code it classifies as,
+    so a device carrying two codes under one rule produces two rows.
+    `count_clearances_under_regulation` uses `count(DISTINCT s)`; the listing
+    did not deduplicate, so the two disagreed with the list longer.
+
+    The obvious fix — `RETURN DISTINCT` — is a **silent no-op on 1.1.0**:
+    measured, two identical rows go in and two come back. So it would have
+    looked like a fix and changed nothing, which is why the deduplication is in
+    Python and this test drives it through the engine boundary.
+    """
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return json.dumps({
+                "columns": ["clearance", "device", "applicant",
+                            "decided", "product_code"],
+                # One clearance, two product codes under the same rule.
+                "records": [["K999001", "A device", "Acme", "2024-01-02", "DXY"],
+                            ["K999001", "A device", "Acme", "2024-01-02", "DXZ"],
+                            ["K999002", "Another", "Acme", "2024-01-03", "DXY"]],
+            }).encode()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())
+
+    got = queries.clearances_under_regulation("870.5150")
+    assert got["error"] is None
+    assert got["count"] == 2, (
+        "a clearance reaching the rule through two product codes was listed "
+        "twice, so the listing disagrees with count(DISTINCT s)")
+    assert [row["clearance"] for row in got["clearances"]] == ["K999001", "K999002"]
+
+
+def test_every_tool_turns_a_none_argument_into_an_error_not_an_empty_answer():
+    """The refusal has to reach the caller as `error`, from all of them —
+    the same sweep that found two tools calling `quoted()` outside their try
+    block last round."""
+    for name in TOOLS:
+        function = getattr(queries, name)
+        params = inspect.signature(function).parameters
+        text_arg = next((p for p in params if p in TEXT_ARGUMENTS), None)
+        if text_arg is None:
+            continue
+        got = function(**{text_arg: None})
+        assert got.get("error"), (
+            f"{name} returned no error for a None argument — an agent reads "
+            f"the empty answer as 'no such device exists'")

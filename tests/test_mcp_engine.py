@@ -340,3 +340,60 @@ def test_an_error_body_that_is_not_utf8_is_still_reported(monkeypatch):
     got = engine.run("MATCH (n) RETURN n")
     assert not got.ok
     assert "502" in got.error
+
+
+def test_a_search_term_longer_than_the_cap_is_refused(monkeypatch):
+    """An agent picks these, so an accidental paste is likelier than an attack.
+    A 100k-character term produced a 100KB statement the engine accepted."""
+    with pytest.raises(engine.Unbounded, match="characters; the limit is"):
+        engine.quoted("x" * 100_000)
+    assert engine.quoted("x" * 10), "an ordinary term was refused"
+
+
+def test_a_non_http_engine_url_is_refused(monkeypatch):
+    """`file:///tmp/fake` with a crafted `api/query` file returns fabricated
+    rows to the agent with `error: None`. Operator-set rather than agent-set,
+    so hardening — but the realistic version is http:// to the wrong host."""
+    monkeypatch.setenv("SAMYAMA_URL", "file:///tmp/fake")
+    with pytest.raises(engine.Unbounded, match="must be http or https"):
+        engine.engine_url()
+    monkeypatch.setenv("SAMYAMA_URL", "http://localhost:9999")
+    assert engine.engine_url() == "http://localhost:9999"
+
+
+def test_a_row_that_does_not_match_its_columns_is_an_error_not_a_short_row(monkeypatch):
+    """`dict(zip(...))` truncated silently: three columns against a two-element
+    record produced two keys and `error: None`, so an agent got a row missing a
+    field with nothing saying so."""
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return json.dumps({"columns": ["a", "b", "c"],
+                               "records": [["1", "2"]]}).encode()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())
+
+    got = engine.run("MATCH (n) RETURN n")
+    assert not got.ok, "a short row was returned as a successful answer"
+    assert "does not match its own columns" in got.error
+
+
+def test_a_none_search_term_is_refused_but_a_number_is_still_coerced():
+    """Two behaviours that look the same and are not.
+
+    `None` mapped to `""`, so `regulations_for_product(None)` searched for the
+    empty string and returned `found: False, error: None` — a bad argument
+    producing an answer indistinguishable from a good one finding nothing.
+
+    A NUMBER must keep working, and this is why refusing every non-`str` would
+    have been wrong: every value these tools compare against is stored as text,
+    `device_class` included, so `device_class=2` has to render as `"2"` rather
+    than be rejected. A number has an unambiguous text meaning; `None` does not.
+    """
+    for refused in (None, ["870.5150"], {"a": 1}):
+        with pytest.raises(engine.Unbounded, match="must be text or a number"):
+            engine.quoted(refused)
+
+    assert engine.quoted(2) == engine.quoted("2"), (
+        "an int stopped coercing to the text the graph stores — device_class "
+        "lookups now match nothing")

@@ -57,4 +57,9 @@ register(mcp)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # `transport="stdio"` explicitly. fastmcp otherwise resolves it from
+    # `settings.transport`, which is env-configurable — so `FASTMCP_TRANSPORT=http`
+    # turns this into an unauthenticated listener on 127.0.0.1:8000 exposing
+    # eight graph-read tools, with no code change and nothing in the README
+    # about it. Naming it makes the variable inert.
+    mcp.run(transport="stdio")

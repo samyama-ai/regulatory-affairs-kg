@@ -45,8 +45,14 @@ FIXTURE = [
     "source: 'test'})",
     "MATCH (p:ProductCode {product_code: \"O'BRIEN\"}), "
     "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
+    # `regulation_number` is on the record because the loader writes it
+    # (etl/load_openfda.py) and the clearances tool's contract is about the
+    # relationship between it and the product-code traversal. A fixture without
+    # it cannot exercise that contract at all — which is why the test asserting
+    # the two joins agree could not be written until it was here.
     "CREATE (s:Submission {id: 'K999001', device_name: 'A test device', "
     "applicant: 'Acme', decision_date: '2024-01-02', "
+    "regulation_number: '870.5150', "
     "advisory_committee: 'Cardiovascular', source: 'test'})",
     "MATCH (p:ProductCode {product_code: 'DXY'}), (r:Regulation {cfr_section: '870.5150'}) "
     "CREATE (p)-[:GOVERNED_BY]->(r)",

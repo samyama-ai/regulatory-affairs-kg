@@ -22,9 +22,23 @@ python -m mcp_server.server
 | `product_codes_by_class` | device categories at one risk class |
 | `graph_provenance` | what is in the graph and where it came from |
 
-The first is the question this graph exists for. It is two hops, because
-`regulation_number` is on the clearance record itself — an exact
-government-issued join, not a name match.
+The first is the question this graph exists for. It is two hops, **through the
+product code**:
+
+    Regulation <-[:GOVERNED_BY]- ProductCode <-[:CLASSIFIED_AS]- Submission
+
+This text used to say the join ran on the clearance's own `regulation_number`.
+It does not — the loader writes that property and no tool reads it. Both are
+exact joins on government-issued codes, but they are different paths, and a
+clearance whose product code carries no regulation edge is invisible to this
+one.
+
+Measured on the loaded graph: all **19,127** clearances are reachable this way,
+and the regulation the traversal reaches equals the `regulation_number` on the
+record for every one of them — **0 disagreements**. 902 product codes carry no
+regulation edge, but no clearance classifies as one of them. A live test
+asserts that equivalence, so the day it stops holding the suite says so rather
+than the answer quietly shrinking.
 
 ## Two tools are separate on purpose
 

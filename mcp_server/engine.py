@@ -21,6 +21,7 @@ import json
 import os
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,14 @@ DEFAULT_URL = "http://127.0.0.1:8080"
 CEILING = 50_000
 
 
+# A search term longer than this is refused. An agent picks these, so an
+# accidental paste is likelier than an attack — a 100k-character term produced
+# a 100KB statement the engine accepted. Refusing keeps the failure legible.
+MAX_TERM = 512
+
+ALLOWED_SCHEMES = ("http", "https")
+
+
 def engine_url() -> str:
     """Where the graph is. Environment first, then config.yaml, then the default.
 
@@ -44,7 +53,7 @@ def engine_url() -> str:
     engine moved does not keep talking to the old address.
     """
     if os.environ.get("SAMYAMA_URL"):
-        return os.environ["SAMYAMA_URL"].rstrip("/")
+        return checked_scheme(os.environ["SAMYAMA_URL"].rstrip("/"))
     config = Path(__file__).resolve().parent / "config.yaml"
     if config.exists():
         host = port = None
@@ -140,7 +149,21 @@ def run(cypher: str) -> Result:
         # path — the one place that must not fail.
         return Result(error=f"query rejected: {str(payload['error'])[:200]}")
     columns = payload.get("columns") or []
-    return Result(rows=[dict(zip(columns, row)) for row in payload.get("records") or []])
+    records = payload.get("records") or []
+    if not isinstance(columns, list) or not isinstance(records, list):
+        return Result(error=f"the engine returned columns/records this module "
+                            f"cannot read: {type(columns).__name__}/"
+                            f"{type(records).__name__}")
+    # `strict=True`: a record shorter than `columns` used to yield a row with
+    # the trailing fields simply absent and `error: None`, so an agent got a
+    # row missing a key with nothing saying so. A string `columns` silently
+    # produced one key per character.
+    try:
+        rows = [dict(zip(columns, row, strict=True)) for row in records]
+    except (ValueError, TypeError) as exc:
+        return Result(error=f"the engine returned a row that does not match its "
+                            f"own columns ({exc})")
+    return Result(rows=rows)
 
 
 def bounded(limit) -> int:
@@ -174,9 +197,26 @@ def bounded(limit) -> int:
     if value > CEILING:
         raise Unbounded(
             f"limit must be at most {CEILING:,}, got {value:,}. The largest "
-            f"label in this graph holds 19,127 nodes, so a larger limit asks "
-            f"for rows that cannot exist.")
+            f"limit larger than the graph asks for rows that cannot exist.")
     return value
+
+
+def checked_scheme(url: str) -> str:
+    """Refuse anything that is not HTTP(S).
+
+    `SAMYAMA_URL=file:///tmp/fake` with a crafted `api/query` file returns
+    fabricated rows to the agent with `error: None`. This is operator-set
+    rather than agent-set, so it is hardening and not a live exploit — the
+    realistic version is `http://` pointed at the wrong host poisoning what the
+    agent reads. Either way the answer is not a graph.
+    """
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ALLOWED_SCHEMES:
+        raise Unbounded(
+            f"the engine URL must be http or https, got {scheme or 'no'} "
+            f"scheme in {url!r}. A non-HTTP source can return anything and it "
+            f"would reach the caller as a query result.")
+    return url
 
 
 class Unbounded(Exception):
@@ -238,9 +278,35 @@ def quoted(value) -> str:
     # length. An MCP server can serve two calls at once against one imported
     # `etl.cypher`, so without it two `quoted()` calls interleave and one
     # reports the other's reason as its own.
+    # `None` is refused; an int or float is still coerced, and the difference
+    # is deliberate.
+    #
+    # `None` used to map to `""`, so `regulations_for_product(None)` searched
+    # for the empty string and returned `found: False, error: None` — the third
+    # meaning in an empty answer this module exists to keep out, arriving
+    # through a different door. `regulation_for_clearance` had a type guard;
+    # the other four did not, and this covers all five in one place.
+    #
+    # But refusing every non-`str` would break something correct: every value
+    # these tools compare against is stored as TEXT, `device_class` included
+    # ("1", "2", "3", "N", "U", "f" — measured), so `device_class=2` MUST
+    # render as `"2"` rather than being rejected. A number has an unambiguous
+    # text meaning; `None` and a list do not.
+    if value is None or isinstance(value, (list, dict, tuple, set)):
+        raise Unbounded(
+            f"a search term must be text or a number, got "
+            f"{type(value).__name__}. An empty answer for a bad argument is "
+            f"indistinguishable from an empty answer for a good one.")
+    text = str(value)
+    if len(text) > MAX_TERM:
+        raise Unbounded(
+            f"the search term is {len(text):,} characters; the limit is "
+            f"{MAX_TERM}. A term that long is an accidental paste rather than "
+            f"a device identifier, and it would be sent as one statement.")
+
     with _SANITISED_LOCK:
         before = len(SANITISED)
-        literal = lit("" if value is None else str(value))
+        literal = lit(text)
         grew = len(SANITISED) > before
         reason = SANITISED[-1].get("reason", "could not be expressed") if grew else None
         del SANITISED[before:]
@@ -253,9 +319,3 @@ def quoted(value) -> str:
             f"written at all. Returning an error rather than a query that "
             f"would find nothing and look like an empty answer.")
     return literal
-
-
-# ---------------------------------------------------------------------------
-# the change-impact question — the one this graph exists for
-# ---------------------------------------------------------------------------
-
