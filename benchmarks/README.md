@@ -1,5 +1,18 @@
 # Benchmarks
 
+**`QUERY_RESULTS.md` is generated. Do not hand-edit it.**
+
+`python -m benchmarks.run_queries` overwrites it on every run, so a manual
+correction is silently lost — and it is the one file here where that would
+happen quietly. If a figure on it is wrong, the query that produces it is
+wrong; fix `queries.py` or `run_queries.py` and re-run.
+
+Commentary in `queries.py` names measured figures with placeholders
+(`{submissions:,}`) rather than typing them, so the page cannot go stale while
+claiming it was measured this run. A placeholder naming a figure the run does
+not measure fails loudly at render.
+
+
 Nine queries against the loaded graph, with measured timings.
 [`QUERY_RESULTS.md`](QUERY_RESULTS.md) is written by the runner — nothing on it
 is typed in.

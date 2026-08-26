@@ -10,10 +10,43 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
+from benchmarks import queries as catalogue
 from benchmarks import run_queries as bench
+
+
+def fake_stats(**overrides) -> dict:
+    """A `shape()` result, in one place.
+
+    Six tests built this inline, so adding a key to `shape()` broke all six at
+    once — which is how a helper earns its place. `test_the_fake_stats_match_shape`
+    below fails if the two ever describe different dicts, so the drift that
+    caused this cannot happen quietly again.
+    """
+    stats = {"nodes": 1, "edges": 1,
+             "by_label": {"Submission": 1},
+             "by_edge": {"CLASSIFIED_AS": 1},
+             "product_codes": 1,
+             "blank_definitions": 0,
+             "class_three": 1,
+             "class_three_regulated": 1}
+    stats.update(overrides)
+    return stats
+
+
+def test_the_fake_stats_match_shape():
+    """`fake_stats()` stands in for `shape()` in every render test, so a key
+    added to one and not the other makes those tests pass against a dict the
+    runner never produces."""
+    import inspect
+    body = inspect.getsource(bench.shape)
+    returned = set(re.findall(r'"(\w+)":', body.split("return {")[-1]))
+    assert returned <= set(fake_stats()), (
+        f"shape() returns {sorted(returned - set(fake_stats()))} which "
+        f"fake_stats() does not")
 
 
 def serve(monkeypatch, answers: dict):
@@ -151,9 +184,7 @@ def test_the_index_comparison_runs_last(monkeypatch):
     order = []
     monkeypatch.setattr(bench, "shape",
                         lambda url: (order.append("shape"),
-                                     {"nodes": 1, "edges": 1,
-                                      "by_label": {"Submission": 1},
-                                      "by_edge": {"CLASSIFIED_AS": 1}})[1])
+                                     fake_stats())[1])
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: (order.append("measure"), {**q, "rows": [],
                                         "median_ms": 1.0, "min_ms": 1.0,
@@ -174,9 +205,7 @@ def test_the_page_makes_no_comparison_it_has_not_measured(monkeypatch):
     fails on the word appearing in a comment.
     """
     monkeypatch.setattr(bench, "shape",
-                        lambda url: {"nodes": 1, "edges": 1,
-                                     "by_label": {"Submission": 1},
-                                     "by_edge": {"CLASSIFIED_AS": 1}})
+                        lambda url: fake_stats())
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: {**q, "rows": [], "median_ms": 1.0,
                                         "min_ms": 1.0, "max_ms": 1.0})
@@ -263,9 +292,7 @@ def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
     """
     import pathlib
     monkeypatch.setattr(bench, "shape",
-                        lambda url: {"nodes": 1, "edges": 1,
-                                     "by_label": {"Submission": 1},
-                                     "by_edge": {"CLASSIFIED_AS": 1}})
+                        lambda url: fake_stats())
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: {**q, "rows": [], "median_ms": 1.0,
                                         "min_ms": 1.0, "max_ms": 1.0})
@@ -284,9 +311,7 @@ def test_the_page_says_its_timings_are_round_trip(monkeypatch):
     """They include HTTP and JSON decoding. Presented bare, a reader takes
     them for engine execution time."""
     monkeypatch.setattr(bench, "shape",
-                        lambda url: {"nodes": 1, "edges": 1,
-                                     "by_label": {"Submission": 1},
-                                     "by_edge": {"CLASSIFIED_AS": 1}})
+                        lambda url: fake_stats())
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: {**q, "rows": [], "median_ms": 1.0,
                                         "min_ms": 1.0, "max_ms": 1.0})
@@ -324,9 +349,7 @@ def test_the_dry_run_renders_without_the_index_comparison(monkeypatch):
     that runs the comparison, so the dry run raised `UnboundLocalError` — the
     one path that is supposed to be safe to take."""
     monkeypatch.setattr(bench, "shape",
-                        lambda url: {"nodes": 1, "edges": 1,
-                                     "by_label": {"Submission": 1},
-                                     "by_edge": {"CLASSIFIED_AS": 1}})
+                        lambda url: fake_stats())
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: {**q, "rows": [], "median_ms": 1.0,
                                         "min_ms": 1.0, "max_ms": 1.0})
@@ -346,9 +369,7 @@ def test_the_speedup_claim_is_not_made_when_nothing_was_measured(monkeypatch):
     already indexed printed "the speedup tracks label size almost exactly"
     above a table of dashes."""
     monkeypatch.setattr(bench, "shape",
-                        lambda url: {"nodes": 1, "edges": 1,
-                                     "by_label": {"Submission": 1},
-                                     "by_edge": {"CLASSIFIED_AS": 1}})
+                        lambda url: fake_stats())
     monkeypatch.setattr(bench, "measure",
                         lambda q, url: {**q, "rows": [], "median_ms": 1.0,
                                         "min_ms": 1.0, "max_ms": 1.0})
@@ -385,3 +406,94 @@ def test_the_response_is_closed(monkeypatch):
     monkeypatch.setattr(bench.urllib.request, "urlopen", lambda *a, **k: R())
     bench.run("MATCH (n) RETURN count(n)", "http://x")
     assert closed, "the response was never closed"
+
+
+# --------------------------------------------------------------------------
+# the page may not type in what it says it measured
+# --------------------------------------------------------------------------
+
+
+def test_the_blank_definition_figures_come_from_the_graph():
+    """The page says "Every figure on this page is written by
+    `python -m benchmarks.run_queries`. Nothing is typed in." — and then
+    carried `4,487 of 7,085` as Python string literals, attributed to the
+    provenance query, which groups nodes by source and says nothing about
+    definitions.
+
+    Correct on the day it was written and stale on the next refresh, under a
+    sentence promising it was measured this run. That is the failure this whole
+    suite exists to prevent, in the artifact it exists to produce.
+    """
+    source = (Path(bench.__file__).read_text()
+              + Path(catalogue.__file__).read_text())
+    rendered = re.search(r"blank `definition` cell.*?counted by this run",
+                         source, re.S)
+    assert rendered, "the sentence is gone — if it moved, move this test with it"
+    assert "{stats['blank_definitions']" in rendered.group(0), (
+        "the count is not interpolated from the run")
+    assert "{stats['product_codes']" in rendered.group(0), (
+        "the denominator is not interpolated from the run")
+
+
+def test_shape_reports_what_the_page_needs_to_state_it():
+    """`shape()` is where the page's figures come from, so the two keys the
+    prose interpolates have to exist — a KeyError at render time would be found
+    only by running the whole suite against a live engine."""
+    import inspect
+    body = inspect.getsource(bench.shape)
+    for key in ("blank_definitions", "product_codes"):
+        assert f'"{key}"' in body, f"shape() no longer returns {key}"
+    assert "p.definition IS NULL" in body, (
+        "the blank-definition count is not measured by a query any more")
+
+
+def test_a_structured_engine_error_does_not_crash_the_error_path():
+    """`payload['error'][:200]` assumes a string. A dict slices to something
+    unreadable and an int raises TypeError inside the error handler — the one
+    place that must not fail. `mcp_server/queries.py` had this fix; this file
+    did not, on the same engine and the same payload shape.
+    """
+    import inspect
+    body = inspect.getsource(bench.run)
+    assert "str(payload['error'])" in body, (
+        "the error is sliced without str() — a non-string error would raise "
+        "inside the handler that exists to report it")
+
+
+def test_every_placeholder_in_the_commentary_is_a_figure_the_run_measures():
+    """`why` is rendered through `format`, so a catalogue entry naming a figure
+    `shape()` does not produce raises KeyError at render — loudly, which is
+    right, but only when someone runs it against an engine.
+
+    Checked here instead, against the same map `report()` builds, so the
+    failure lands in the suite rather than mid-run.
+    """
+    import inspect
+    body = inspect.getsource(bench.report)
+    measured = set(re.findall(r'"(\w+)":\s*stats\[', body))
+    measured |= set(re.findall(r'"(\w+)":\s*stats\["by_label"\]', body))
+    assert measured, "report() no longer builds a figures map — move this test"
+
+    for query in catalogue.QUERIES:
+        for field in re.findall(r"\{([^}]*)\}", query["why"]):
+            key = field.split(":")[0]
+            assert key in measured, (
+                f"{query['name']!r} names {key!r}, which this run does not "
+                f"measure — it would raise KeyError at render")
+
+
+def test_the_commentary_does_not_type_the_figures_it_quotes():
+    """Two `why` fields carried `19,127 submissions` and `holds 531` as typed
+    text, under a page asserting nothing on it is typed in. Both were correct
+    on the day and both go stale on a refresh.
+
+    Matched loosely — any comma-grouped number, or any bare number of four
+    digits or more — because the point is not those two figures, it is that
+    prose on a generated page should not carry any.
+    """
+    for query in catalogue.QUERIES:
+        typed = re.findall(r"(?<![\d.{])\d{1,3}(?:,\d{3})+(?![\d}])", query["why"])
+        typed += re.findall(r"(?<![\d.{,])\d{4,}(?![\d},])", query["why"])
+        assert not typed, (
+            f"{query['name']!r} types {typed} into prose the page renders; "
+            f"name a measured figure with a placeholder instead")

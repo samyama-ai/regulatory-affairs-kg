@@ -35,6 +35,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from benchmarks.queries import QUERIES
+
 URL = "http://localhost:8080"
 ENGINE = "Samyama-Graph 1.1.0"
 OUT = Path(__file__).resolve().parent / "QUERY_RESULTS.md"
@@ -45,122 +47,6 @@ EXPECTED_LABELS = {"Submission", "ProductCode", "Regulation"}
 EXPECTED_EDGES = {"CLASSIFIED_AS", "GOVERNED_BY"}
 
 REPEATS = 5     # median of five; a single timing on a warm cache is not a figure
-
-
-QUERIES: list[dict] = [
-    {
-        "name": "Change impact — every clearance under one rule",
-        "question": "A rule changes. Which clearances are affected?",
-        "why": ("The question this graph exists for. Two hops, because "
-                "`regulation_number` is on the clearance record itself — an exact "
-                "government-issued join, not a name match. In a relational schema "
-                "this is the query that needs the join written by hand each time "
-                "the shape of the question changes."),
-        "cypher": ("MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
-                   "<-[:CLASSIFIED_AS]-(s:Submission) "
-                   "WHERE r.cfr_section = '870.5150' "
-                   "RETURN count(s) AS clearances"),
-    },
-    {
-        "name": "Change impact — the affected clearances themselves",
-        "question": "Which specific devices are affected, and whose are they?",
-        "why": "The same traversal, returning rows rather than a count.",
-        "cypher": ("MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
-                   "<-[:CLASSIFIED_AS]-(s:Submission) "
-                   "WHERE r.cfr_section = '870.5150' "
-                   "RETURN s.id AS clearance, s.applicant AS applicant, "
-                   "s.decision_date AS decided "
-                   "ORDER BY s.decision_date DESC LIMIT 5"),
-    },
-    {
-        "name": "Busiest regulations",
-        "question": "Where would a rule change hurt most?",
-        "why": ("An aggregation across the whole graph. Answers which rules carry "
-                "the most clearances, which is where regulatory attention goes."),
-        "cypher": ("MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
-                   "<-[:CLASSIFIED_AS]-(s:Submission) "
-                   "RETURN r.cfr_section AS cfr_section, count(s) AS clearances "
-                   "ORDER BY clearances DESC LIMIT 10"),
-    },
-    {
-        "name": "Device to law",
-        "question": "Which rules must this product code comply with?",
-        # 4,487 of 7,085 product codes carry no `definition` — 63%, measured.
-        # A blank cell in the rendered table is that, not a parse failure, and
-        # the page says so rather than leaving a reader to guess.
-        "why": ("One hop from the join hub. `product_code` is on every openFDA "
-                "endpoint; device *names* are not consistent between them, so a "
-                "name is never the key."),
-        "cypher": ("MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
-                   "WHERE p.product_code = 'DXY' "
-                   "RETURN p.definition AS device_category, p.device_class AS class, "
-                   "r.cfr_section AS cfr_section"),
-    },
-    {
-        "name": "Law to device categories",
-        "question": "Which device categories does one rule govern?",
-        "why": "The reverse of the above, and the first half of a change-impact answer.",
-        "cypher": ("MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
-                   "WHERE r.cfr_section = '870.5150' "
-                   "RETURN p.product_code AS product_code, p.definition AS category "
-                   "LIMIT 10"),
-    },
-    {
-        "name": "Clearance to rule",
-        "question": "Which rule governs this one clearance?",
-        "why": "A point lookup through two hops — the query an inspector runs.",
-        "cypher": ("MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)"
-                   "-[:GOVERNED_BY]->(r:Regulation) "
-                   "WHERE s.id = 'K233820' "
-                   "RETURN s.device_name AS device, p.product_code AS product_code, "
-                   "r.cfr_section AS cfr_section"),
-    },
-    {
-        "name": "Clearances by reviewing authority",
-        "question": "Which FDA advisory committees review the most clearances?",
-        "why": ("A grouping over 19,127 submissions. **The distribution is an "
-                "artifact of the slice, not a finding about the FDA**: this "
-                "graph holds 21 CFR part 870 clearances, so Cardiovascular "
-                "leads by construction. What the query demonstrates is the "
-                "grouping, not the ranking. Note also this is *decided* "
-                "clearances — openFDA publishes no pending queue, so 'pending "
-                "by authority' has no answer in this data."),
-        "cypher": ("MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL "
-                   "RETURN s.advisory_committee AS committee, count(s) AS clearances "
-                   "ORDER BY clearances DESC LIMIT 10"),
-    },
-    {
-        "name": "High-risk device categories with a rule attached",
-        "question": "How many Class III categories carry a regulation in this slice?",
-        "why": ("A filtered scan with a join — the population a reviewer starts "
-                "from. It is NOT the count of Class III categories: this slice "
-                "holds 531, and only the ones with a GOVERNED_BY edge are "
-                "joinable here."),
-        # `count(DISTINCT p)`, not `count(p)`. The bare form counts PATTERN
-        # MATCHES, so a product code governed by two regulations would be
-        # counted twice. Measured: at most one regulation per product code, so
-        # both forms agree today — the distinct form is correct by construction
-        # rather than by a property of the current data.
-        #
-        # The column name says what the JOIN counts, not what "Class III" means.
-        # It read `class_three_categories`, which a reader takes as the number
-        # of Class III device categories — measured, that is 531, and only 145
-        # of them carry a GOVERNED_BY edge in this slice. Reporting 145 under
-        # that name understated the population by nearly four times.
-        "cypher": ("MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
-                   "WHERE p.device_class = '3' "
-                   "RETURN count(DISTINCT p) AS class_three_with_a_regulation"),
-    },
-    {
-        "name": "Provenance",
-        "question": "What is in this graph, and where did it come from?",
-        "why": ("The question a reviewer asks before trusting any answer above. "
-                "Every node carries the openFDA endpoint it was built from."),
-        "cypher": ("MATCH (n) WHERE n.source IS NOT NULL "
-                   "RETURN n.source AS source, count(n) AS nodes "
-                   "ORDER BY nodes DESC"),
-    },
-]
 
 
 def run(cypher: str, url: str) -> tuple[dict, float]:
@@ -183,7 +69,12 @@ def run(cypher: str, url: str) -> tuple[dict, float]:
         raise SystemExit(f"no engine at {url}: {exc.reason}")
     elapsed = (time.perf_counter() - started) * 1000
     if "error" in payload:
-        raise SystemExit(f"query rejected: {payload['error'][:200]}\n  {cypher}")
+        # `str(...)` first. `payload['error'][:200]` assumes a string: a dict
+        # or a list slices to something unreadable, and an int raises
+        # TypeError inside the error path — the one place that must not fail.
+        # `mcp_server/queries.py` already had this; the same payload, the same
+        # engine, one file fixed and the other not.
+        raise SystemExit(f"query rejected: {str(payload['error'])[:200]}\n  {cypher}")
     return payload, elapsed
 
 
@@ -227,8 +118,26 @@ def shape(url: str) -> dict:
             f"made of. The traversal timings below would be measuring nothing. "
             f"Import the snapshot into a fresh instance.")
 
+    # Measured, not typed. The page says "nothing is typed in" and then carried
+    # `4,487 of 7,085` as Python string literals, attributed to the provenance
+    # query — which groups nodes by source endpoint and says nothing about
+    # definitions. Correct today and stale on the next refresh, under a
+    # sentence promising it was measured this run.
+    blank, _ = run("MATCH (p:ProductCode) WHERE p.definition IS NULL "
+                   "RETURN count(p) AS c", url)
+    # The two figures the class-three commentary rests on. Its whole point is
+    # that the population and the joinable subset differ by nearly four times,
+    # so both have to be measured or the argument quotes itself.
+    c3, _ = run("MATCH (p:ProductCode) WHERE p.device_class = '3' "
+                "RETURN count(p) AS c", url)
+    c3r, _ = run("MATCH (p:ProductCode)-[:GOVERNED_BY]->(:Regulation) "
+                 "WHERE p.device_class = '3' RETURN count(DISTINCT p) AS c", url)
     return {"nodes": nodes, "edges": edge_total,
-            "by_label": counts, "by_edge": by_edge}
+            "by_label": counts, "by_edge": by_edge,
+            "product_codes": counts.get("ProductCode", 0),
+            "blank_definitions": rows_of(blank)[0]["c"],
+            "class_three": rows_of(c3)[0]["c"],
+            "class_three_regulated": rows_of(c3r)[0]["c"]}
 
 
 def measure(query: dict, url: str) -> dict:
@@ -395,10 +304,30 @@ def report(url: str, with_index_effect: bool = True) -> str:
               "| Edge type | Count |", "|---|---:|"]
     for edge, count in sorted(stats["by_edge"].items(), key=lambda kv: -kv[1]):
         lines.append(f"| `{edge}` | {count:,} |")
+    # The percentage too. A share derived here and a count derived there is how
+    # the two stop agreeing; and it is only meaningful when there is a
+    # denominator, which a graph loaded with no ProductCodes would not have —
+    # the label guard above already refuses that, but this does not depend on
+    # it holding.
+    # What the prose is allowed to name. Keyed, not positional, so a catalogue
+    # entry naming a figure that is not measured fails loudly at render rather
+    # than rendering a brace.
+    figures = {
+        "submissions": stats["by_label"].get("Submission", 0),
+        "product_codes": stats["product_codes"],
+        "class_three": stats["class_three"],
+        "class_three_regulated": stats["class_three_regulated"],
+    }
+
+    total_codes = stats["product_codes"]
+    share = (f"{stats['blank_definitions'] / total_codes:.0%}"
+             if total_codes else "no product codes loaded")
+
     lines += [f"| **Total edges** | **{stats['edges']:,}** |", "",
-              "**A blank `definition` cell is missing source data, not a parse "
-        "failure.** 4,487 of 7,085 product codes carry no definition in "
-        "openFDA — 63%, measured by this run's own provenance query.",
+              f"**A blank `definition` cell is missing source data, not a "
+              f"parse failure.** {stats['blank_definitions']:,} of "
+              f"{stats['product_codes']:,} product codes carry no definition "
+              f"in openFDA — {share}, counted by this run.",
         "",
         "This is a **bounded slice**, not the full 31,120,490 openFDA records —",
               "see [`../DATASET-CARD.md`](../DATASET-CARD.md) for what was loaded "
@@ -410,7 +339,12 @@ def report(url: str, with_index_effect: bool = True) -> str:
             "",
             f"**{q['question']}**",
             "",
-            q["why"],
+            # `why` may name measured figures, and must not TYPE them — the
+            # page's own claim is that nothing on it is typed in. Rendering it
+            # through `format` lets the catalogue write `{submissions:,}` and
+            # get this run's number, so a stale figure becomes impossible
+            # rather than merely unlikely.
+            q["why"].format(**figures),
             "",
             "```cypher",
             q["cypher"],
