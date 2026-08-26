@@ -5,12 +5,35 @@
 `python -m benchmarks.run_queries` overwrites it on every run, so a manual
 correction is silently lost — and it is the one file here where that would
 happen quietly. If a figure on it is wrong, the query that produces it is
-wrong; fix `queries.py` or `run_queries.py` and re-run.
+wrong; fix `queries.py`, `measure.py` or `run_queries.py` and re-run.
+
+## Layout
+
+| | |
+|---|---|
+| `queries.py` | the catalogue — nine questions, their Cypher, and the commentary |
+| `measure.py` | talking to the engine: the request, the guards that refuse a graph this report would misdescribe, the timings, and the index comparison |
+| `run_queries.py` | the rendering and the CLI |
+
+`run_queries.py` was one file until it passed the 500-line review limit; review
+skips a file over it, so an oversized module is an unread one.
 
 Commentary in `queries.py` names measured figures with placeholders
 (`{submissions:,}`) rather than typing them, so the page cannot go stale while
 claiming it was measured this run. A placeholder naming a figure the run does
-not measure fails loudly at render.
+not measure is refused by name, and so is a literal brace — `{870.5150}` is an
+ordinary thing to write on a page about CFR sections, and `str.format` reads
+it as a positional field.
+
+## This changes the graph, by default
+
+The index comparison **creates indexes**, so a plain run changes the engine it
+is pointed at — and changes it irreversibly for measurement, because the
+unindexed timings cannot be taken again on that instance. The run says so on
+stderr before it starts.
+
+`--print` writes to stdout and skips the comparison, so it is a true dry run.
+`--with-index-effect` asks for it anyway.
 
 
 Nine queries against the loaded graph, with measured timings.

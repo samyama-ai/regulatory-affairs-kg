@@ -8,151 +8,30 @@ counts from it would have produced a page wrong in a way nobody could see.
 
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 
 import pytest
 
 from benchmarks import queries as catalogue
 from benchmarks import run_queries as bench
+from tests.benchmark_support import fake_stats
 
 
-def fake_stats(**overrides) -> dict:
-    """A `shape()` result, in one place.
+def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None):
+    """Patch the three things `report()` calls out to, in one place.
 
-    Six tests built this inline, so adding a key to `shape()` broke all six at
-    once — which is how a helper earns its place. `test_the_fake_stats_match_shape`
-    below fails if the two ever describe different dicts, so the drift that
-    caused this cannot happen quietly again.
+    Six render tests set these up by hand, and the block runs to seven lines
+    each — so a change to `measure()`'s return shape meant editing six copies,
+    which is the drift `fake_stats()` already exists to stop one layer up.
+
+    Each is overridable: pass a callable to watch or to fail.
     """
-    stats = {"nodes": 1, "edges": 1,
-             "by_label": {"Submission": 1},
-             "by_edge": {"CLASSIFIED_AS": 1},
-             "product_codes": 1,
-             "blank_definitions": 0,
-             "class_three": 1,
-             "class_three_regulated": 1}
-    stats.update(overrides)
-    return stats
-
-
-def test_the_fake_stats_match_shape():
-    """`fake_stats()` stands in for `shape()` in every render test, so a key
-    added to one and not the other makes those tests pass against a dict the
-    runner never produces."""
-    import inspect
-    body = inspect.getsource(bench.shape)
-    returned = set(re.findall(r'"(\w+)":', body.split("return {")[-1]))
-    assert returned <= set(fake_stats()), (
-        f"shape() returns {sorted(returned - set(fake_stats()))} which "
-        f"fake_stats() does not")
-
-
-def serve(monkeypatch, answers: dict):
-    """Answer each query by substring match on the cypher."""
-    class R:
-        def __init__(self, payload):
-            self._p = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return json.dumps(self._p).encode()
-
-    def urlopen(request, *a, **k):
-        cypher = json.loads(request.data)["query"]
-        for needle, payload in answers.items():
-            if needle in cypher:
-                return R(payload)
-        return R({"columns": ["c"], "records": [[0]]})
-    monkeypatch.setattr(bench.urllib.request, "urlopen", urlopen)
-
-
-def counts(total, submissions=0, product_codes=0, regulations=0, edges=0,
-           classified_as=None, governed_by=None):
-    """Answers for every count `shape()` asks for.
-
-    The per-edge-type answers default to a share of `edges` rather than to
-    zero: `EXPECTED_EDGES` is enforced now, so a fixture that leaves them at
-    zero is a fixture describing a graph with no edges — which `shape()`
-    should and does refuse.
-    """
-    each = edges // 2 if edges else 0
-    return {
-        "(n:Submission)": {"columns": ["c"], "records": [[submissions]]},
-        "(n:ProductCode)": {"columns": ["c"], "records": [[product_codes]]},
-        "(n:Regulation)": {"columns": ["c"], "records": [[regulations]]},
-        "MATCH (n) RETURN count(n)": {"columns": ["c"], "records": [[total]]},
-        "MATCH ()-[r]->() RETURN": {"columns": ["c"], "records": [[edges]]},
-        "[r:CLASSIFIED_AS]": {"columns": ["c"],
-                              "records": [[classified_as if classified_as is not None else each]]},
-        "[r:GOVERNED_BY]": {"columns": ["c"],
-                            "records": [[governed_by if governed_by is not None else each]]},
-    }
-
-
-def test_a_co_mingled_engine_is_refused(monkeypatch):
-    """The engine used while writing this held the regulatory graph and a
-    drug-interactions graph — 273,279 nodes between them. Label counts from
-    that describe neither, and nothing in the output would have shown it."""
-    serve(monkeypatch, counts(total=273_279, submissions=19_127,
-                              product_codes=7_085, regulations=2_284))
-    with pytest.raises(SystemExit, match="Another KG is loaded"):
-        bench.shape("http://x")
-
-
-def test_a_clean_graph_is_accepted(monkeypatch):
-    serve(monkeypatch, counts(total=28_496, submissions=19_127,
-                              product_codes=7_085, regulations=2_284, edges=25_310))
-    got = bench.shape("http://x")
-    assert got["nodes"] == 28_496
-    assert got["by_label"]["Submission"] == 19_127
-
-
-def test_an_engine_holding_unlabelled_nodes_is_refused(monkeypatch):
-    """What this test actually covered. Five nodes, none carrying a label this
-    graph is made of, trips the co-mingling guard — the message says another KG
-    is loaded, and it is right to."""
-    serve(monkeypatch, counts(total=5, submissions=0, product_codes=0,
-                              regulations=0, edges=2))
-    with pytest.raises(SystemExit, match="Another KG is loaded"):
-        bench.shape("http://x")
-
-
-def test_a_genuinely_empty_engine_is_refused(monkeypatch):
-    """The case the name promised and nothing covered: a snapshot that failed
-    to import leaves ZERO nodes, which passes the co-mingling guard (0 == 0)
-    and would produce a page of zeroes that reads as a finding.
-
-    It is caught by the edge guard, which is why that guard had to stop being
-    decorative — `EXPECTED_EDGES` was declared and never checked.
-    """
-    serve(monkeypatch, counts(total=0, submissions=0, product_codes=0,
-                              regulations=0, edges=0))
-    with pytest.raises(SystemExit, match="no CLASSIFIED_AS, GOVERNED_BY edges"):
-        bench.shape("http://x")
-
-
-def test_a_rejected_query_stops_the_run(monkeypatch):
-    """A parse error must not become an empty results table."""
-    serve(monkeypatch, {"MATCH": {"error": "Parse error: unexpected token"}})
-    with pytest.raises(SystemExit, match="rejected"):
-        bench.run("MATCH (n) RETURN n", "http://x")
-
-
-def test_a_500_is_not_reported_as_a_missing_engine(monkeypatch):
-    import io
-    import urllib.error
-    monkeypatch.setattr(bench.urllib.request, "urlopen",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            urllib.error.HTTPError("u", 500, "boom", {}, io.BytesIO(b"x"))))
-    with pytest.raises(SystemExit, match="500"):
-        bench.run("MATCH (n) RETURN n", "http://x")
+    monkeypatch.setattr(bench, "shape", stats or (lambda url: fake_stats()))
+    monkeypatch.setattr(bench, "measure", measure or (
+        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
+                        "min_ms": 1.0, "max_ms": 1.0}))
+    monkeypatch.setattr(bench, "index_effect",
+                        index_effect or (lambda url, sizes: []))
 
 
 # --------------------------------------------------------------------------
@@ -168,10 +47,6 @@ def test_every_query_carries_its_question_and_its_reason():
         assert query["cypher"].strip().startswith("MATCH"), query["name"]
 
 
-def test_the_timings_are_a_median_not_a_single_reading():
-    assert bench.REPEATS >= 3
-
-
 def test_the_index_comparison_runs_last(monkeypatch):
     """It creates indexes. Every timing above it must be the unindexed figure,
     because that is what the shipped schema produces.
@@ -182,15 +57,13 @@ def test_the_index_comparison_runs_last(monkeypatch):
     the name in a docstring would have passed.
     """
     order = []
-    monkeypatch.setattr(bench, "shape",
-                        lambda url: (order.append("shape"),
-                                     fake_stats())[1])
-    monkeypatch.setattr(bench, "measure",
-                        lambda q, url: (order.append("measure"), {**q, "rows": [],
-                                        "median_ms": 1.0, "min_ms": 1.0,
-                                        "max_ms": 1.0})[1])
-    monkeypatch.setattr(bench, "index_effect",
-                        lambda url, sizes: (order.append("index_effect"), [])[1])
+    stub_report(
+        monkeypatch,
+        stats=lambda url: (order.append("shape"), fake_stats())[1],
+        measure=lambda q, url: (order.append("measure"),
+                                {**q, "rows": [], "median_ms": 1.0,
+                                 "min_ms": 1.0, "max_ms": 1.0})[1],
+        index_effect=lambda url, sizes: (order.append("index_effect"), [])[1])
     bench.report("http://x")
     assert order[-1] == "index_effect", order
     assert "measure" in order, order
@@ -204,12 +77,7 @@ def test_the_page_makes_no_comparison_it_has_not_measured(monkeypatch):
     A source scan passes on a disclaimer that never reaches the output and
     fails on the word appearing in a comment.
     """
-    monkeypatch.setattr(bench, "shape",
-                        lambda url: fake_stats())
-    monkeypatch.setattr(bench, "measure",
-                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
-                                        "min_ms": 1.0, "max_ms": 1.0})
-    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    stub_report(monkeypatch)
     page = bench.report("http://x").lower()
     assert "not a comparison" in page.replace("**", ""), \
         "the page does not say it is not a database comparison"
@@ -238,50 +106,6 @@ def test_a_column_missing_from_the_first_row_is_still_reported():
     assert got.splitlines()[2].endswith("|  |"), got
 
 
-def test_the_index_measurement_refuses_a_graph_it_has_already_indexed(monkeypatch):
-    """It creates the indexes it measures, so a SECOND run against the same
-    instance compares an indexed lookup against an indexed lookup — a scan
-    time that is not a scan, and a speedup near 1 that reads as "the index did
-    nothing". Refused rather than reported wrongly."""
-    serve(monkeypatch, {"SHOW INDEXES": {
-        "columns": ["label", "property", "type"],
-        "records": [[label, prop, "BTREE"] for label, prop, _ in bench.KEYS]}})
-    got = bench.index_effect("http://x", {"Submission": 19_127})
-    assert got, "nothing reported at all"
-    assert all(row["scan_ms"] is None for row in got), got
-    assert "already indexed" in got[0]["note"], got
-
-
-def test_one_stale_index_does_not_remove_the_keys_still_measurable(monkeypatch):
-    """Returning only the clashing keys dropped every key that could still be
-    measured, so one stale index on one label silently shortened the table and
-    nothing in the output said why.
-
-    Every key is reported: the indexed one carries its note, the rest carry
-    figures.
-    """
-    serve(monkeypatch, {"SHOW INDEXES": {
-        "columns": ["label", "property", "type"],
-        "records": [["Submission", "id", "BTREE"]]}})
-    got = bench.index_effect("http://x", {label: 1 for label, _, _ in bench.KEYS})
-    assert len(got) == len(bench.KEYS), got
-    noted = [row for row in got if row["scan_ms"] is None]
-    measured = [row for row in got if row["scan_ms"] is not None]
-    assert [row["key"] for row in noted] == ["Submission.id"], noted
-    assert len(measured) == len(bench.KEYS) - 1, measured
-
-
-def test_a_renamed_show_indexes_column_is_refused_not_ignored(monkeypatch):
-    """`row.get("label")` returns None for every row if the column is renamed,
-    the set holds `(None, None)`, nothing clashes — and the guard silently
-    stops guarding, reporting an indexed instance as though it were fresh."""
-    serve(monkeypatch, {"SHOW INDEXES": {
-        "columns": ["name", "prop", "type"],
-        "records": [["Submission", "id", "BTREE"]]}})
-    with pytest.raises(SystemExit, match="SHOW INDEXES no longer returns"):
-        bench.existing_indexes("http://x")
-
-
 def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
     """`QUERY_RESULTS.md` sits in `benchmarks/` and the card is at the repo
     root, so a bare `DATASET-CARD.md` is a link to a file that is not there.
@@ -291,12 +115,7 @@ def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
     overwritten by the next run.
     """
     import pathlib
-    monkeypatch.setattr(bench, "shape",
-                        lambda url: fake_stats())
-    monkeypatch.setattr(bench, "measure",
-                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
-                                        "min_ms": 1.0, "max_ms": 1.0})
-    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    stub_report(monkeypatch)
     page = bench.report("http://x")
 
     assert "DATASET-CARD.md" in page
@@ -310,12 +129,7 @@ def test_the_page_links_the_dataset_card_by_a_path_that_resolves(monkeypatch):
 def test_the_page_says_its_timings_are_round_trip(monkeypatch):
     """They include HTTP and JSON decoding. Presented bare, a reader takes
     them for engine execution time."""
-    monkeypatch.setattr(bench, "shape",
-                        lambda url: fake_stats())
-    monkeypatch.setattr(bench, "measure",
-                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
-                                        "min_ms": 1.0, "max_ms": 1.0})
-    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [])
+    stub_report(monkeypatch)
     page = bench.report("http://x").lower()
     assert "round-trip" in page or "round trip" in page, \
         "the page presents timings without saying what is inside them"
@@ -382,82 +196,9 @@ def test_the_speedup_claim_is_not_made_when_nothing_was_measured(monkeypatch):
         "the claim was made above a table that measured nothing")
 
 
-def test_the_response_is_closed(monkeypatch):
-    """An unclosed response holds its socket until the garbage collector gets
-    to it, and this issues one request per repeat per query — nine queries at
-    five repeats before the index comparison even starts.
-
-    Watched, not read out of the source: a `with` in a comment satisfies a
-    source scan, and a correct refactor that closes it another way fails one.
-    """
-    closed = []
-
-    class R:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            closed.append(True)
-            return False
-
-        def read(self):
-            return json.dumps({"columns": ["c"], "records": [[1]]}).encode()
-
-    monkeypatch.setattr(bench.urllib.request, "urlopen", lambda *a, **k: R())
-    bench.run("MATCH (n) RETURN count(n)", "http://x")
-    assert closed, "the response was never closed"
-
-
 # --------------------------------------------------------------------------
 # the page may not type in what it says it measured
 # --------------------------------------------------------------------------
-
-
-def test_the_blank_definition_figures_come_from_the_graph():
-    """The page says "Every figure on this page is written by
-    `python -m benchmarks.run_queries`. Nothing is typed in." — and then
-    carried `4,487 of 7,085` as Python string literals, attributed to the
-    provenance query, which groups nodes by source and says nothing about
-    definitions.
-
-    Correct on the day it was written and stale on the next refresh, under a
-    sentence promising it was measured this run. That is the failure this whole
-    suite exists to prevent, in the artifact it exists to produce.
-    """
-    source = (Path(bench.__file__).read_text()
-              + Path(catalogue.__file__).read_text())
-    rendered = re.search(r"blank `definition` cell.*?counted by this run",
-                         source, re.S)
-    assert rendered, "the sentence is gone — if it moved, move this test with it"
-    assert "{stats['blank_definitions']" in rendered.group(0), (
-        "the count is not interpolated from the run")
-    assert "{stats['product_codes']" in rendered.group(0), (
-        "the denominator is not interpolated from the run")
-
-
-def test_shape_reports_what_the_page_needs_to_state_it():
-    """`shape()` is where the page's figures come from, so the two keys the
-    prose interpolates have to exist — a KeyError at render time would be found
-    only by running the whole suite against a live engine."""
-    import inspect
-    body = inspect.getsource(bench.shape)
-    for key in ("blank_definitions", "product_codes"):
-        assert f'"{key}"' in body, f"shape() no longer returns {key}"
-    assert "p.definition IS NULL" in body, (
-        "the blank-definition count is not measured by a query any more")
-
-
-def test_a_structured_engine_error_does_not_crash_the_error_path():
-    """`payload['error'][:200]` assumes a string. A dict slices to something
-    unreadable and an int raises TypeError inside the error handler — the one
-    place that must not fail. `mcp_server/queries.py` had this fix; this file
-    did not, on the same engine and the same payload shape.
-    """
-    import inspect
-    body = inspect.getsource(bench.run)
-    assert "str(payload['error'])" in body, (
-        "the error is sliced without str() — a non-string error would raise "
-        "inside the handler that exists to report it")
 
 
 def test_every_placeholder_in_the_commentary_is_a_figure_the_run_measures():
@@ -468,18 +209,15 @@ def test_every_placeholder_in_the_commentary_is_a_figure_the_run_measures():
     Checked here instead, against the same map `report()` builds, so the
     failure lands in the suite rather than mid-run.
     """
-    import inspect
-    body = inspect.getsource(bench.report)
-    measured = set(re.findall(r'"(\w+)":\s*stats\[', body))
-    measured |= set(re.findall(r'"(\w+)":\s*stats\["by_label"\]', body))
-    assert measured, "report() no longer builds a figures map — move this test"
+    figures = bench.figures_for(fake_stats())
+    assert figures, "figures_for() built nothing — move this test"
 
+    # Rendered, not pattern-matched. The previous version regexed `report()`
+    # for `"x": stats[`, so it agreed with how the map was SPELLED rather than
+    # with what it held — and it broke when the map moved into its own
+    # function without a single figure changing.
     for query in catalogue.QUERIES:
-        for field in re.findall(r"\{([^}]*)\}", query["why"]):
-            key = field.split(":")[0]
-            assert key in measured, (
-                f"{query['name']!r} names {key!r}, which this run does not "
-                f"measure — it would raise KeyError at render")
+        bench.rendered(query["why"], figures, query["name"])
 
 
 def test_the_commentary_does_not_type_the_figures_it_quotes():
@@ -497,3 +235,111 @@ def test_the_commentary_does_not_type_the_figures_it_quotes():
         assert not typed, (
             f"{query['name']!r} types {typed} into prose the page renders; "
             f"name a measured figure with a placeholder instead")
+
+
+# --------------------------------------------------------------------------
+# rendering a `why`, and the two ways `str.format` refuses one
+# --------------------------------------------------------------------------
+
+def test_a_literal_brace_in_a_why_names_the_entry_rather_than_raising():
+    """A CFR section in braces is an ordinary thing to write on a page about
+    CFR sections, and `str.format` reads it as a positional field:
+    `{870.5150}` gave `IndexError: Replacement index 870 out of range` from
+    inside report generation, AFTER every query had been measured, with a
+    traceback pointing at the renderer rather than at the catalogue entry.
+    """
+    with pytest.raises(SystemExit, match="literal brace has to be doubled"):
+        bench.rendered("a rule like {870.5150} matters", {"submissions": 1},
+                       "Which devices does a rule change touch?")
+
+
+def test_a_why_asking_for_an_unmeasured_figure_says_what_is_available():
+    """`KeyError` carried the key name and nothing else — not which entry
+    asked for it, and not what it could have asked for instead."""
+    with pytest.raises(SystemExit) as raised:
+        bench.rendered("uses {recalls:,}", {"submissions": 1}, "A question")
+    assert "A question" in str(raised.value), "the failing entry is not named"
+    assert "submissions" in str(raised.value), "the available figures are not listed"
+
+
+def test_a_why_that_names_a_measured_figure_is_substituted():
+    """The behaviour the guards must not have broken: the whole point is that
+    a figure on the page comes from the run rather than being typed."""
+    assert bench.rendered("{submissions:,} submissions", {"submissions": 19127},
+                          "A question") == "19,127 submissions"
+
+
+# --------------------------------------------------------------------------
+# the catalogue, and the run that writes to the graph
+# --------------------------------------------------------------------------
+
+def test_an_empty_catalogue_is_refused_rather_than_raising_from_max():
+    """`max()` on an empty sequence raises `ValueError` with no context. A
+    report of no queries would otherwise render a timings section with no
+    timings — a page that looks finished."""
+    with pytest.raises(SystemExit, match="catalogue is empty"):
+        bench.slowest_of([])
+
+
+def test_the_default_run_says_it_will_change_the_graph_before_it_does(monkeypatch, capsys, tmp_path):
+    """The index comparison CREATES INDEXES, so the default invocation changes
+    the engine it is pointed at — irreversibly for measurement, since the
+    unindexed timings cannot be taken again on that instance.
+
+    The report disclosed it afterwards, which is the wrong end: by then the
+    indexes exist. It is announced on stderr first now, and `--help` is not
+    the place an operator reads it.
+    """
+    monkeypatch.setattr(bench, "report", lambda url, with_index_effect: "report body")
+    monkeypatch.setattr(bench, "OUT", tmp_path / "results.md")
+    bench.main(["--url", "http://x"])
+    warned = capsys.readouterr().err
+    assert "CREATES INDEXES" in warned, (
+        "the default run mutates the graph and said nothing before doing it")
+
+
+def test_print_is_a_dry_run_and_says_nothing_about_indexes(monkeypatch, capsys):
+    """`--print` reads as a dry run, so it must not warn about a mutation it
+    is not going to make — a warning that cries wolf is one nobody reads."""
+    seen = {}
+
+    def fake_report(url, with_index_effect):
+        seen["with_index_effect"] = with_index_effect
+        return "report body"
+    monkeypatch.setattr(bench, "report", fake_report)
+    bench.main(["--url", "http://x", "--print"])
+    out = capsys.readouterr()
+    assert seen["with_index_effect"] is False, "--print asked for the mutating measurement"
+    assert "CREATES INDEXES" not in out.err
+    assert "report body" in out.out, "--print did not write the report to stdout"
+
+
+def test_the_blank_definition_figures_come_from_the_graph(monkeypatch):
+    """The page says "Every figure on this page is written by
+    `python -m benchmarks.run_queries`. Nothing is typed in." — and then
+    carried `4,487 of 7,085` as Python string literals, attributed to the
+    provenance query, which groups nodes by source and says nothing about
+    definitions.
+
+    Correct on the day it was written and stale on the next refresh, under a
+    sentence promising it was measured this run. That is the failure this whole
+    suite exists to prevent, in the artifact it exists to produce.
+
+    Asserted against the RENDERED page with two different sets of stats, not by
+    reading the source for `{stats['blank_definitions']}`. A source scan agreed
+    with how the interpolation was SPELLED; rendering twice proves the number
+    tracks the run, which is the actual claim.
+    """
+    def page_with(**figures):
+        stub_report(monkeypatch, stats=lambda url: fake_stats(**figures))
+        return bench.report("http://x")
+
+    first = page_with(blank_definitions=4487, product_codes=7085)
+    assert "4,487" in first and "7,085" in first, (
+        "the blank-definition figures are not on the page")
+
+    second = page_with(blank_definitions=11, product_codes=22)
+    assert "11" in second and "22" in second
+    assert "4,487" not in second, (
+        "the figure did not move with the run — it is typed into the page, "
+        "which is the exact thing the page promises it is not")
