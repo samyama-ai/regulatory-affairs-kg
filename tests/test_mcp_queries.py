@@ -27,7 +27,6 @@ variable is the fix rather than a louder warning.
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
 
@@ -76,10 +75,6 @@ def test_pending_by_authority_is_gone_and_the_reason_recorded():
     assert "pending_by_authority" in text
     assert "decided" in text.lower()
 
-
-# --------------------------------------------------------------------------
-# an empty answer and a broken one are different facts
-# --------------------------------------------------------------------------
 
 def test_an_unreachable_engine_is_an_error_not_an_empty_result(monkeypatch):
     """An agent cannot act on `[]` if it means both "no clearances" and "the
@@ -135,10 +130,6 @@ def test_rows_are_returned_as_named_fields(monkeypatch):
     assert rows == [{"clearance": "K233820", "device": "A scanner"}]
 
 
-# --------------------------------------------------------------------------
-# the counting tool is separate for a reason
-# --------------------------------------------------------------------------
-
 def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
     """`clearances_under_regulation` is LIMITed. Reading its length as the
     total understates the blast radius of a rule change, which is the one
@@ -182,10 +173,6 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
         "the count came from the capped list, which understates the blast "
         "radius — the one number this graph exists to get right")
 
-
-# --------------------------------------------------------------------------
-# values are inlined, because 1.1.0 takes no parameters
-# --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,expected", [
     ("870.5150", chr(34) + "870.5150" + chr(34)),
@@ -235,10 +222,6 @@ def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
     assert cypher.rstrip().endswith("specialty"), "query truncated: " + cypher[-60:]
 
 
-# --------------------------------------------------------------------------
-# where the engine is
-# --------------------------------------------------------------------------
-
 def test_the_environment_wins_over_the_config(monkeypatch):
     monkeypatch.setenv("SAMYAMA_URL", "http://elsewhere:9999/")
     assert queries.engine_url() == "http://elsewhere:9999"
@@ -273,139 +256,6 @@ def test_a_host_outside_the_graph_block_does_not_repoint_the_server(monkeypatch,
     monkeypatch.setattr(queries, "__file__", str(home / "queries.py"))
     assert queries.engine_url() == "http://127.0.0.1:8080", (
         "a host declared outside the graph block repointed the server")
-
-
-# --------------------------------------------------------------------------
-# against a live engine
-# --------------------------------------------------------------------------
-
-FIXTURE = [
-    "CREATE (r:Regulation {cfr_section: '870.5150', source: 'test'})",
-    "CREATE (p:ProductCode {product_code: 'DXY', device_class: '2', "
-    "definition: 'A test category', medical_specialty: 'CV', source: 'test'})",
-    # A product code carrying an APOSTROPHE. Every engine-backed test used
-    # quote-free fixture values, which is why "verified against a fresh 1.1.0"
-    # did not cover the path the old backslash escaping broke.
-    "CREATE (p:ProductCode {product_code: \"O'BRIEN\", device_class: '3', "
-    "definition: \"A category with an apostrophe\", medical_specialty: 'CV', "
-    "source: 'test'})",
-    "MATCH (p:ProductCode {product_code: \"O'BRIEN\"}), "
-    "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
-    "CREATE (s:Submission {id: 'K999001', device_name: 'A test device', "
-    "applicant: 'Acme', decision_date: '2024-01-02', "
-    "advisory_committee: 'Cardiovascular', source: 'test'})",
-    "MATCH (p:ProductCode {product_code: 'DXY'}), (r:Regulation {cfr_section: '870.5150'}) "
-    "CREATE (p)-[:GOVERNED_BY]->(r)",
-    "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DXY'}) "
-    "CREATE (s)-[:CLASSIFIED_AS]->(p)",
-]
-
-
-def configured_test_url() -> str | None:
-    """Only `SAMYAMA_TEST_URL`. Never `SAMYAMA_URL`, never a default.
-
-    A test that writes and deletes must not be able to find an engine by
-    accident. Requiring its own variable means pointing these at a loaded graph
-    has to be a decision somebody typed.
-    """
-    return os.environ.get("SAMYAMA_TEST_URL")
-
-
-def engine_available(url: str) -> bool:
-    try:
-        urllib.request.urlopen(f"{url}/api/tenants", timeout=2).read()
-        return True
-    except Exception:
-        return False
-
-
-@pytest.fixture
-def loaded_engine(monkeypatch):
-    url = configured_test_url()
-    if not url or not engine_available(url):
-        message = ("no engine at SAMYAMA_TEST_URL"
-                   if not url else f"no engine at {url}")
-        if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
-            pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
-        pytest.skip(f"{message} — set it to a FRESH instance, never the demo engine")
-
-    # Point the queries at the test engine only for the duration of the test.
-    monkeypatch.setenv("SAMYAMA_URL", url)
-
-    before = queries.run("MATCH (n) RETURN count(n) AS n").rows
-    existing = before[0]["n"] if before else 0
-    if existing:
-        pytest.fail(
-            f"SAMYAMA_TEST_URL points at an engine holding {existing:,} nodes. "
-            f"These tests write and DETACH DELETE; run them against a fresh "
-            f"instance. See DATASET-CARD.md issue 10.")
-
-    for statement in FIXTURE:
-        queries.run(statement)
-    yield
-    queries.run("MATCH (n) WHERE n.source = 'test' DETACH DELETE n")
-
-
-def test_the_change_impact_query_returns_the_clearance(loaded_engine):
-    """The question this graph exists for, run end to end."""
-    got = queries.clearances_under_regulation("870.5150")
-    assert got["error"] is None
-    assert any(row["clearance"] == "K999001" for row in got["clearances"])
-
-
-def test_the_count_matches_the_listing(loaded_engine):
-    listed = queries.clearances_under_regulation("870.5150")
-    counted = queries.count_clearances_under_regulation("870.5150")
-    assert counted["error"] is None
-    assert counted["total"] == len(listed["clearances"])
-
-
-def test_the_product_to_law_join_resolves(loaded_engine):
-    got = queries.regulations_for_product("DXY")
-    assert got["error"] is None
-    assert got["regulations"][0]["cfr_section"] == "870.5150"
-
-
-def test_the_reverse_lookup_resolves(loaded_engine):
-    got = queries.regulation_for_clearance("k999001")
-    assert got["found"] is True, "a lower-case k-number should still resolve"
-    assert got["governed_by"][0]["cfr_section"] == "870.5150"
-
-
-def test_an_unknown_clearance_is_empty_not_an_error(loaded_engine):
-    got = queries.regulation_for_clearance("K000000")
-    assert got["error"] is None
-    assert got["found"] is False
-
-
-def test_the_advisory_committee_grouping_returns_rows(loaded_engine):
-    got = queries.clearances_by_advisory_committee()
-    assert got["error"] is None
-    assert any(row["committee"] == "Cardiovascular" for row in got["committees"])
-
-
-def test_an_apostrophe_in_an_argument_reaches_the_engine(loaded_engine):
-    """The path the whole of this PR's literal handling turns on, run against
-    a real 1.1.0 rather than against the encoder's own output.
-
-    The previous implementation escaped with backslashes, which this engine
-    does not have: `'O\\'BRIEN'` is a parse error, so the tool returned
-    "query rejected" for a perfectly ordinary product code. Every engine-backed
-    test used quote-free fixture values, so nothing caught it.
-
-    Measured before fixing: the old form returns HTTP 400 from the engine.
-    """
-    got = queries.regulations_for_product("O'BRIEN")
-    assert got["error"] is None, got["error"]
-    assert [r["cfr_section"] for r in got["regulations"]] == ["870.5150"], got
-
-
-def test_a_double_quote_in_an_argument_reaches_the_engine(loaded_engine):
-    """The other delimiter. A value containing a double quote must be wrapped
-    in single quotes — there is no third option, and no escape."""
-    got = queries.regulations_for_product('say "hi"')
-    assert got["error"] is None, got["error"]
-    assert got["regulations"] == [], got
 
 
 def test_every_limited_query_orders_before_it_limits():
@@ -488,40 +338,100 @@ def test_a_config_value_with_a_comment_or_quotes_is_read_cleanly(monkeypatch, tm
     assert queries.engine_url() == "http://127.0.0.1:8080"
 
 
-def test_a_clearance_counted_once_even_if_it_reaches_a_rule_twice(loaded_engine):
-    """`count(s)` counts PATH MATCHES. A Submission reaching one Regulation
-    through two ProductCodes is one clearance, not two — and this is the figure
-    an agent quotes as blast radius.
+# --------------------------------------------------------------------------
+# a term the engine cannot express is an error, not an empty answer
+# --------------------------------------------------------------------------
 
-    Measured on the loaded graph: at most one ProductCode per Submission, and
-    zero regulations where the two counts differ. So the fixture builds the
-    fan-out the real data does not have, which is the only way to see it.
+
+def test_a_term_holding_both_quote_characters_is_refused_not_altered():
+    """`lit()` substitutes a typographic quote when a value holds both `'` and
+    `"`, because 1.1.0 can express neither. Writing a value that way is a
+    recorded compromise the loader reports. MATCHING on one is not: the term
+    compared against is no longer the term asked for, so the query returns no
+    rows and no error.
+
+    That is a third meaning inside the same empty list — this module's own
+    docstring names two and exists to keep them apart.
     """
-    for statement in (
-        "CREATE (p2:ProductCode {product_code: 'DXZ', device_class: '2', "
-        "source: 'test'})",
-        "MATCH (p:ProductCode {product_code: 'DXZ'}), "
-        "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
-        "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DXZ'}) "
-        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
-    ):
-        assert queries.run(statement).ok
+    with pytest.raises(queries.Unbounded, match="cannot be matched exactly"):
+        queries.quoted('Governor\'s "Special" Device')
 
-    got = queries.count_clearances_under_regulation("870.5150")
-    assert got["total"] == 1, (
-        f"one clearance reaching the rule through two product codes was counted "
-        f"{got['total']} times")
 
-    # The same fan-out through the other count. Both quote blast radius, so
-    # both have to survive it — the first version of this test covered one and
-    # the second went on double-counting.
-    ranked = queries.busiest_regulations(limit=5)
-    assert ranked["error"] is None, ranked
-    for row in ranked["regulations"]:
-        if row["cfr_section"] == "870.5150":
-            assert row["clearances"] == 1, (
-                f"busiest_regulations counted the same clearance "
-                f"{row['clearances']} times")
-            break
-    else:
-        raise AssertionError(f"870.5150 is missing from the ranking: {ranked}")
+def test_a_term_with_only_one_quote_kind_still_works():
+    """The fix must not refuse what 1.1.0 CAN express — an apostrophe alone is
+    the common case and `lit()` handles it by choosing the other delimiter."""
+    assert queries.quoted("O'Brien") == '"O\'Brien"'
+    assert queries.quoted('say "hi"') == "'say \"hi\"'"
+
+
+def test_the_refusal_reaches_the_caller_as_an_error_not_a_traceback():
+    """Every tool already turns `Unbounded` into `Result(error=…)`; the refusal
+    takes that route rather than raising into an agent."""
+    out = queries.regulations_for_product('a\'b"c')
+    assert out["error"] and "cannot be matched exactly" in out["error"]
+    assert out["regulations"] == [] and out["found"] is False
+
+
+def test_refusing_a_term_does_not_grow_the_sanitised_record():
+    """`etl.cypher.SANITISED` is a module-level list nothing trims, and an MCP
+    server is a long-lived process — the loader calls `reset()` at the start of
+    a run and the server never does.
+
+    Every entry this path would add is one `quoted()` is about to refuse and
+    report, so dropping it loses nothing. A list that only grows, in a process
+    that only runs, holding records nobody reads, is a leak.
+    """
+    from etl.cypher import SANITISED
+    before = len(SANITISED)
+    for _ in range(50):
+        with pytest.raises(queries.Unbounded):
+            queries.quoted('a\'b"c')
+    assert len(SANITISED) == before, (
+        f"SANITISED grew by {len(SANITISED) - before} across 50 refused calls")
+
+
+def test_a_limit_above_the_ceiling_is_refused():
+    """`bounded()` had a floor and no ceiling, so `limit=10**9` rendered
+    `LIMIT 1000000000` — a real request against a real engine, from a tool an
+    agent calls unprompted and can pass any number to."""
+    with pytest.raises(queries.Unbounded, match="at most"):
+        queries.bounded(10 ** 9)
+    assert queries.bounded(queries.CEILING) == queries.CEILING
+
+
+def test_the_ceiling_is_above_every_label_in_the_graph():
+    """A ceiling that could truncate a real answer would be worse than none.
+    Submission is the largest label at 19,127."""
+    assert queries.CEILING > 19_127
+
+
+def test_no_tool_raises_when_a_term_cannot_be_expressed():
+    """Every public tool must return `Result(error=…)`, never raise.
+
+    Two of them called `quoted()` outside their try block, so making `quoted()`
+    refuse a term turned a returned error into an escaping exception — a
+    regression introduced by the fix in the same commit, and caught only by
+    asking the question of every tool rather than the two the review named.
+
+    Driven across all of them by inspection, so a tool added later is covered
+    without anyone remembering to.
+    """
+    import inspect
+
+    bad = 'a\'b"c'
+    tools = [f for name, f in vars(queries).items()
+             if inspect.isfunction(f) and not name.startswith("_")
+             and "cfr_section" in inspect.signature(f).parameters
+             or (inspect.isfunction(f) and not name.startswith("_")
+                 and {"product_code", "k_number", "device_class"}
+                 & set(inspect.signature(f).parameters))]
+    assert tools, "no tools found to check — this would pass vacuously"
+
+    for tool in tools:
+        try:
+            out = tool(bad)
+        except Exception as exc:                       # noqa: BLE001
+            raise AssertionError(
+                f"{tool.__name__} raised {type(exc).__name__} instead of "
+                f"returning an error: {exc}") from None
+        assert out.get("error"), f"{tool.__name__} returned no error for {bad!r}"

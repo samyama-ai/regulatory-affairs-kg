@@ -46,9 +46,13 @@ from pathlib import Path
 # The loader's literal encoder, not a second one. `etl/cypher.py` is pure text
 # functions with no engine dependency, so this costs nothing and keeps one
 # measured implementation of "what 1.1.0 accepts inside a literal".
-from etl.cypher import lit
+from etl.cypher import SANITISED, lit
 
 DEFAULT_URL = "http://127.0.0.1:8080"
+
+# The largest LIMIT this module will send. Above every label count in the graph
+# — Submission is the biggest at 19,127 — so it never truncates a real answer.
+CEILING = 50_000
 
 
 def engine_url() -> str:
@@ -143,6 +147,13 @@ def bounded(limit) -> int:
     `-5` into `LIMIT -5`, which the engine rejects with a message about the
     whole statement. An agent gets `Result(error=…)` for everything else in
     this module; a bad argument should not be the one case that raises.
+
+    **A ceiling as well as a floor.** The floor was here from the start and the
+    ceiling was not, so `limit=10**9` rendered `LIMIT 1000000000` — a real
+    request against a real engine, from a tool an agent calls unprompted and
+    can pass any number to. CEILING is above every count this graph holds
+    (19,127 Submissions is the largest label), so it cannot truncate a genuine
+    answer; it only refuses a number nobody meant.
     """
     try:
         value = int(limit)
@@ -150,6 +161,11 @@ def bounded(limit) -> int:
         raise Unbounded(f"limit must be a whole number, got {limit!r}") from None
     if value < 1:
         raise Unbounded(f"limit must be at least 1, got {value}")
+    if value > CEILING:
+        raise Unbounded(
+            f"limit must be at most {CEILING:,}, got {value:,}. The largest "
+            f"label in this graph holds 19,127 nodes, so a larger limit asks "
+            f"for rows that cannot exist.")
     return value
 
 
@@ -177,11 +193,45 @@ def quoted(value) -> str:
 
     **Everything reaching this function is forced to `str` first.** `lit()`
     emits numbers unquoted, correctly — but every value these tools compare
-    against is stored as text, `device_class` included ("1", "2", "3" and "N",
-    measured against the loaded graph). An int reaching `lit()` would render
-    `2` and match nothing, silently.
+    against is stored as text, `device_class` included (measured: "1", "2",
+    "3", "N", "U" and "f"). An int reaching `lit()` would render `2` and match
+    nothing, silently.
+
+    **And a value `lit()` had to ALTER is refused rather than sent.** This is
+    the one place the loader's encoder and a query encoder must differ. When a
+    value holds both quote characters, 1.1.0 can express neither, so `lit()`
+    substitutes a typographic quote and records it in `SANITISED`. Writing a
+    value that way is a recorded, reported compromise. MATCHING on one is not:
+    the term compared against is no longer the term asked for, so the query
+    returns no rows and no error, and an agent reads that as "no such device
+    exists".
+
+    That is the third meaning this module exists to keep out of an empty list —
+    its own docstring names two. So `quoted()` watches `SANITISED` across the
+    call and raises when it grew; every tool already turns `Unbounded` into
+    `Result(error=…)`, and this takes the same route.
     """
-    return lit("" if value is None else str(value))
+    # Cleared, not just measured. `SANITISED` is a module-level list that
+    # `etl.cypher` appends to and never trims; the loader calls `reset()` at
+    # the start of a run, and an MCP server is a long-lived process that never
+    # does. Every entry it accumulates here is one this function is about to
+    # refuse and report, so nothing is lost by dropping it — and a list that
+    # only grows in a server that only runs is a leak whose contents nobody
+    # reads.
+    before = len(SANITISED)
+    literal = lit("" if value is None else str(value))
+    grew = len(SANITISED) > before
+    reason = SANITISED[-1].get("reason", "could not be expressed") if grew else None
+    del SANITISED[before:]
+    if grew:
+        raise Unbounded(
+            f"the search term {value!r} {reason}, so it cannot be matched "
+            f"exactly. "
+            f"Samyama-Graph 1.1.0 has no escape sequence inside a string "
+            f"literal, so a value holding both quote characters cannot be "
+            f"written at all. Returning an error rather than a query that "
+            f"would find nothing and look like an empty answer.")
+    return literal
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +247,13 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
 
     cfr_section: e.g. "870.5150"
     """
+    # `quoted()` inside the try as well as `bounded()`. Both refuse an
+    # argument this module will not send, both raise `Unbounded`, and an agent
+    # gets `Result(error=…)` for everything else here — a refused argument must
+    # not be the one case that raises into the caller.
     try:
         rows_wanted = bounded(limit)
+        where = quoted(cfr_section)
     except Unbounded as exc:
         return {"cfr_section": cfr_section, "clearances": [], "count": 0,
                 "error": str(exc)}
@@ -206,7 +261,7 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
     result = run(
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
-        f"WHERE r.cfr_section = {quoted(cfr_section)} "
+        f"WHERE r.cfr_section = {where} "
         f"RETURN s.id AS clearance, s.device_name AS device, "
         f"s.applicant AS applicant, s.decision_date AS decided, "
         f"p.product_code AS product_code "
@@ -223,10 +278,17 @@ def count_clearances_under_regulation(cfr_section: str) -> dict:
     and the list is capped — an agent reading `count: 25` off a limited list
     would understate the blast radius.
     """
+    # Guarded for the same reason as the listing tool: a term `quoted()` will
+    # not send must come back as an error, not as an exception.
+    try:
+        where = quoted(cfr_section)
+    except Unbounded as exc:
+        return {"cfr_section": cfr_section, "total": None, "error": str(exc)}
+
     result = run(
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
-        f"WHERE r.cfr_section = {quoted(cfr_section)} "
+        f"WHERE r.cfr_section = {where} "
         # DISTINCT for the same reason `busiest_regulations` uses it: a
         # Submission reaching this Regulation through two ProductCodes is one
         # clearance, not two. This is the figure an agent quotes as blast
@@ -245,14 +307,26 @@ def regulations_for_product(product_code: str) -> dict:
 
     product_code: e.g. "DXY"
     """
+    # OPTIONAL, so "this product code is unregulated" and "there is no such
+    # product code" stop being the same empty list. 902 of the loaded product
+    # codes carry no regulation number, so the first case is common — and an
+    # agent told `[]` for both cannot act on either.
+    try:
+        where = quoted(product_code)
+    except Unbounded as exc:
+        return {"product_code": product_code, "regulations": [], "count": 0,
+                "found": False, "error": str(exc)}
+
     result = run(
-        f"MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
-        f"WHERE p.product_code = {quoted(product_code)} "
+        f"MATCH (p:ProductCode) WHERE p.product_code = {where} "
+        f"OPTIONAL MATCH (p)-[:GOVERNED_BY]->(r:Regulation) "
         f"RETURN r.cfr_section AS cfr_section, p.definition AS device_category, "
         f"p.device_class AS device_class, p.medical_specialty AS specialty"
     )
-    return {"product_code": product_code, "regulations": result.rows,
-            "count": len(result.rows), "error": result.error}
+    regulated = [r for r in result.rows if r.get("cfr_section") is not None]
+    return {"product_code": product_code, "regulations": regulated,
+            "count": len(regulated), "found": bool(result.rows),
+            "error": result.error}
 
 
 def regulation_for_clearance(k_number: str) -> dict:
@@ -268,10 +342,21 @@ def regulation_for_clearance(k_number: str) -> dict:
                 "error": f"k_number must be a string, got {type(k_number).__name__}"}
     k_number = k_number.upper()
 
+    # Same reason as `regulations_for_product`: the inner three-hop chain made
+    # a real clearance whose product code is unregulated indistinguishable from
+    # a k-number that does not exist. `found` now means the CLEARANCE was
+    # found; a null `cfr_section` means it exists and its category carries no
+    # regulation number.
+    try:
+        where = quoted(k_number)
+    except Unbounded as exc:
+        return {"k_number": k_number, "governed_by": [], "found": False,
+                "error": str(exc)}
+
     result = run(
-        f"MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)"
+        f"MATCH (s:Submission) WHERE s.id = {where} "
+        f"OPTIONAL MATCH (s)-[:CLASSIFIED_AS]->(p:ProductCode)"
         f"-[:GOVERNED_BY]->(r:Regulation) "
-        f"WHERE s.id = {quoted(k_number)} "
         f"RETURN s.device_name AS device, s.applicant AS applicant, "
         f"s.decision_date AS decided, p.product_code AS product_code, "
         f"p.device_class AS device_class, r.cfr_section AS cfr_section"
@@ -332,17 +417,40 @@ def clearances_by_advisory_committee(limit: int = 15) -> dict:
 def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
     """Device categories at one risk class.
 
-    device_class: "1", "2" or "3" — Class III is the high-risk route.
+    device_class: measured values are "1", "2", "3", "N", "U" and "f" — not
+    the three the first version of this docstring named. Class III is the
+    high-risk route.
+
+    **OPTIONAL MATCH, because the inner join was dropping most of the answer.**
+    `(p)-[:GOVERNED_BY]->(r)` returns only product codes that carry a
+    regulation, and for the class this tool exists to answer about, most do
+    not. Measured against the loaded graph:
+
+        class   product codes   with a regulation   dropped
+        1               2,401               2,399         2
+        2               3,633               3,628         5
+        3                 531                 145       386
+        N                 383                   1       382
+
+    Class III lost 73% of its answer, silently, under a count the caller reads
+    as complete. `benchmarks/run_queries.py` already found this and renamed its
+    own query `class_three_with_a_regulation` to say so; this tool kept the
+    join and the misleading name.
+
+    `cfr_section` is None where the FDA publishes no regulation number for a
+    product code, which is a fact about the source rather than a gap in the
+    load — `unregulated` counts them so the caller need not.
     """
     try:
         rows_wanted = bounded(limit)
+        where = quoted(device_class)
     except Unbounded as exc:
         return {"device_class": device_class, "product_codes": [], "count": 0,
-                "error": str(exc)}
+                "unregulated": 0, "error": str(exc)}
 
     result = run(
-        f"MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) "
-        f"WHERE p.device_class = {quoted(device_class)} "
+        f"MATCH (p:ProductCode) WHERE p.device_class = {where} "
+        f"OPTIONAL MATCH (p)-[:GOVERNED_BY]->(r:Regulation) "
         f"RETURN p.product_code AS product_code, p.definition AS device_category, "
         f"r.cfr_section AS cfr_section "
         # ORDER BY before LIMIT, or repeated calls return different subsets of
@@ -351,7 +459,9 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         f"ORDER BY p.product_code LIMIT {rows_wanted}"
     )
     return {"device_class": device_class, "product_codes": result.rows,
-            "count": len(result.rows), "error": result.error}
+            "count": len(result.rows),
+            "unregulated": sum(1 for r in result.rows if r.get("cfr_section") is None),
+            "error": result.error}
 
 
 def graph_provenance() -> dict:
