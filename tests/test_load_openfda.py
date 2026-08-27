@@ -595,3 +595,31 @@ def test_quoted_device_name_survives_the_round_trip(loaded_fixture):
         f'MATCH (p:ProductCode) WHERE p.product_code = "{keys["codes"][0]}" RETURN p.device_name'
     )
     assert name == 'Test "quoted" device', repr(name)
+
+
+def test_the_altered_count_is_not_read_off_the_capped_example_list():
+    """`SANITISED` holds EXAMPLES and is capped; the count must not come from
+    it.
+
+    Control-character collapses are recorded now and were not before, so this
+    list grows with the data rather than with the handful of both-quote values
+    it used to hold — 456,154 values pass through `lit()` in a full load. Left
+    unbounded it is a memory cost and a report nobody can read; capped without
+    a separate counter, the report says a load altered 50 values when it
+    altered four thousand, and understates in the one place anyone would look.
+    """
+    from etl import cypher
+
+    cypher.reset()
+    for i in range(cypher.SANITISED_CAP * 3):
+        cypher.lit(f"a\tb{i}")
+
+    assert len(cypher.SANITISED) == cypher.SANITISED_CAP, "the cap did not hold"
+    assert sum(cypher.SANITISED_TOTAL.values()) == cypher.SANITISED_CAP * 3, (
+        "the count was capped along with the examples, so the load report "
+        "understates how many values were altered")
+    assert set(cypher.SANITISED_TOTAL) == {"contains a control character"}
+    cypher.reset()
+    assert not cypher.SANITISED and not cypher.SANITISED_TOTAL, (
+        "reset() left one of the two behind, so a process loading twice "
+        "reports the first run's total as the second's")

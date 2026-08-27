@@ -25,9 +25,18 @@ import re
 # run's total as the second's.
 SANITISED: list[dict] = []
 
+#: How many alterations happened, by reason — exact however large the load.
+#: `SANITISED` holds examples and is capped; this is the figure a report
+#: quotes, and it cannot be read off a truncated list.
+SANITISED_TOTAL: dict[str, int] = {}
+
+#: Examples kept in memory. The load report prints five.
+SANITISED_CAP = 50
+
 
 def reset() -> None:
     SANITISED.clear()
+    SANITISED_TOTAL.clear()
 
 
 class Unrepresentable(Exception):
@@ -156,7 +165,23 @@ def lit(value) -> str:
     opposite policy.
     """
     def record(reason, original, substitute):
-        SANITISED.append({"original": original, "reason": reason})
+        # COUNTED always, STORED up to a cap.
+        #
+        # Control-character collapses are recorded now and were not before, so
+        # this list can grow with the data rather than with the handful of
+        # both-quote values it used to hold — 456,154 values pass through here
+        # in a full load, and a source that carries a stray tab in every row
+        # would put an entry in memory for each of them, then write them all
+        # into the load report.
+        #
+        # The COUNT is what the report quotes and stays exact; the report
+        # prints five examples, so keeping a few more than that loses nothing
+        # a reader sees. `SANITISED_TOTAL` is per reason, because "how many"
+        # and "of what kind" are the two questions and one number cannot
+        # answer both.
+        SANITISED_TOTAL[reason] = SANITISED_TOTAL.get(reason, 0) + 1
+        if len(SANITISED) < SANITISED_CAP:
+            SANITISED.append({"original": original, "reason": reason})
         return substitute
 
     return _literal(value, record)

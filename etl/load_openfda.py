@@ -40,7 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from etl import cypher
-from etl.cypher import SANITISED, lit, merge, split_statements
+from etl.cypher import (
+    SANITISED, SANITISED_TOTAL, lit, merge, split_statements)
 from etl.transport import post_query
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -430,8 +431,13 @@ def main(argv: list[str] | None = None) -> int:
     if clear_counts["no_product_code"]:
         print(f"  {clear_counts['no_product_code']:,} clearances carry no "
               f"product code — no CLASSIFIED_AS edge")
-    if SANITISED:
-        print(f"\n  {len(SANITISED)} value(s) altered to be representable:")
+    altered = sum(SANITISED_TOTAL.values())
+    if altered:
+        # `SANITISED_TOTAL`, not `len(SANITISED)`. The list holds examples and
+        # is capped, so a count read off it reports 50 for a load that altered
+        # four thousand values — and the report is where anyone would look.
+        print(f"\n  {altered:,} value(s) altered to be representable "
+              f"({', '.join(f'{n:,} {r}' for r, n in sorted(SANITISED_TOTAL.items()))}):")
         for record in SANITISED[:5]:
             print(f"    [{record['reason']}] {record['original'][:110]}")
 
@@ -439,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     (DATA_DIR / "load-report.json").write_text(
         json.dumps({"measured_at": stamp, "elapsed_seconds": round(elapsed, 1),
                     "statements": engine.statements, "retries": engine.retries,
-                    "sanitised_values": len(SANITISED),
+                    "sanitised_values": altered,
                     "statements_issued": issued,
                     "unresolvable_product_codes": unresolvable, **graph}, indent=2)
     )
