@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,7 +28,8 @@ from pathlib import Path
 # The loader's literal encoder, not a second one. `etl/cypher.py` is pure text
 # functions with no engine dependency, so this costs nothing and keeps one
 # measured implementation of "what this engine accepts inside a literal".
-from etl.cypher import SANITISED, lit
+from etl.cypher import Unrepresentable, lit_exact
+from etl.transport import post_query
 
 DEFAULT_URL = "http://127.0.0.1:8080"
 
@@ -114,19 +114,17 @@ def run(cypher: str) -> Result:
         # which nothing catches there, so a malformed config turned "no engine"
         # into a traceback out of the error reporter.
         url = engine_url()
-        request = urllib.request.Request(
-            url + "/api/query",
-            data=json.dumps({"query": cypher}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
     except Unbounded as exc:
         return Result(error=str(exc))
 
     try:
-        # `with`: an unclosed response holds its socket until the garbage
-        # collector gets to it, and an MCP server is long-lived.
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read()
+        # The request comes from `etl.transport.post_query`; every `except`
+        # below is this module's own policy. A tool answering an agent must
+        # never raise — it returns a `Result` for anything, including the
+        # failures the loader retries and the benchmark runner exits on.
+        #
+        # 60 seconds, not the loader's 120: a caller is waiting for this one.
+        payload, _ = post_query(cypher=cypher, url=url, timeout=60)
     except urllib.error.HTTPError as exc:
         # HTTPError subclasses URLError and must be caught first, or a 500 from
         # a running engine is reported as "no engine" — the one wrong diagnosis
@@ -144,16 +142,20 @@ def run(cypher: str) -> Result:
         return Result(error=f"no engine at {url}: {exc.reason}")
     except (TimeoutError, OSError) as exc:
         return Result(error=f"engine unreachable: {exc}")
-
-    # A 200 carrying something that is not a JSON object: a proxy login page, a
-    # truncated body, a bare JSON list. All three raised out of this module —
-    # `json.loads` on the first two, `payload.get` on the third — and every
-    # tool funnels through here, so it must return a Result for anything.
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    # A 200 carrying something that is not JSON: a proxy login page, a
+    # truncated body. `post_query` decodes, so this arrives as an exception
+    # rather than as a value — and the body is still named, because
+    # `JSONDecodeError.doc` carries the text it failed on and
+    # `UnicodeDecodeError.object` the bytes. A message that says only "not
+    # JSON" sends someone to the wrong place; one that shows a login page
+    # ends the search.
+    except json.JSONDecodeError as exc:
         return Result(error=f"the engine did not return JSON ({exc}): "
-                            f"{body[:120]!r}")
+                            f"{exc.doc[:120]!r}")
+    except UnicodeDecodeError as exc:
+        return Result(error=f"the engine did not return JSON ({exc}): "
+                            f"{exc.object[:120]!r}")
+
     if not isinstance(payload, dict):
         return Result(error=f"the engine returned {type(payload).__name__}, "
                             f"not a JSON object: {str(payload)[:120]}")
@@ -239,171 +241,47 @@ class Unbounded(Exception):
     """A limit this module will not send."""
 
 
-# Guards the read-call-delete sequence in `quoted()` against a second call
-# arriving on another thread. See the comment there.
-_SANITISED_LOCK = threading.Lock()
-
-
 def quoted(value) -> str:
-    """A Cypher literal, via the encoder the loader already uses.
+    """A Cypher literal that is EXACTLY the term asked for, or a refusal.
 
-    **This used to escape with backslashes, which this engine does not have.**
-    **Stated as measured behaviour, never as a version number.** `1.1.0` is
-    the image TAG; the engine behind it reports **1.7.0** on `/api/status`, so
-    every "1.1.0 cannot do X" in this repo named a version nobody was running
-    and could not visibly go stale. `tests/test_engine_limits.py
-    ::test_a_backslash_is_not_an_escape_character` asks the running engine
-    instead, in both directions — what the parser accepts inside a literal and
-    what a stored value matches back against — so the day a build starts
-    decoding escapes the suite fails rather than `quoted()` silently sending a
-    different term than the one asked for.
+    `etl.cypher.lit_exact` chooses the quote style per value and raises on
+    anything it cannot express, rather than substituting and recording. That
+    distinction is the whole of this function: writing an altered value is a
+    reported compromise the loader makes deliberately; MATCHING on one is not,
+    because the term compared against is no longer the term asked for and the
+    query comes back with no rows and no error — which an agent reads as "no
+    such device".
 
-    `\\'` is a parse error on this engine, not an escaped quote — measured, and
-    recorded in DATASET-CARD.md known issue 6 and in `etl/cypher.lit`. So
-    `regulations_for_product("O'Brien")` did not inline safely, it produced a
-    statement the engine rejects, surfaced to the agent as "query rejected".
-    Fail-closed, but not what the code claimed. And `\\\\` did not double a
-    backslash; it inserted two literal ones, silently changing the value
-    matched.
+    **This used to establish the same thing by watching a global.** It read
+    `len(SANITISED)`, called `lit()`, then deleted back to the length it had
+    read — one module trimming a list another module owns, under a lock that
+    only covered callers arriving through this one while `etl.cypher.props`
+    and `merge` appended without it. Safe only because the loader and the
+    server are separate processes. The lock, the delete and the
+    `reset()`-ownership question all go with it.
 
-    `etl.cypher.lit` chooses the quote style per value instead, which is the
-    only thing that works against an engine with no escape sequences. It is a
-    pure text function with no engine dependency, so importing it costs
-    nothing — and two divergent literal encoders in one repo is how the second
-    one drifts, which is exactly what happened here.
+    It also had a hole that the watching could not close: `lit()` collapsed
+    control characters to a space and recorded nothing, so the one alteration
+    the invariant could not see was the one that silently changed the term.
+    `lit_exact` refuses those too.
 
-    **Everything reaching this function is forced to `str` first.** `lit()`
-    emits numbers unquoted, correctly — but every value these tools compare
-    against is stored as text, `device_class` included (measured: "1", "2",
-    "3", "N", "U" and "f"). An int reaching `lit()` would render `2` and match
-    nothing, silently.
-
-    **And a value `lit()` had to ALTER is refused rather than sent.** This is
-    the one place the loader's encoder and a query encoder must differ. When a
-    value holds both quote characters, the engine can express neither, so `lit()`
-    substitutes a typographic quote and records it in `SANITISED`. Writing a
-    value that way is a recorded, reported compromise. MATCHING on one is not:
-    the term compared against is no longer the term asked for, so the query
-    returns no rows and no error, and an agent reads that as "no such device
-    exists".
-
-    That is the third meaning this module exists to keep out of an empty list —
-    its own docstring names two. So `quoted()` watches `SANITISED` across the
-    call and raises when it grew; every tool already turns `Unbounded` into
-    `Result(error=…)`, and this takes the same route.
+    **Everything reaching this is forced to `str` first.** `lit()` emits
+    numbers unquoted, correctly — but every value these tools compare against
+    is stored as text, `device_class` included (measured: "1", "2", "3", "N",
+    "U" and "f"). An int reaching `lit()` would render `2` and match nothing.
     """
-    # Cleared, not just measured. `SANITISED` is a module-level list that
-    # `etl.cypher` appends to and never trims; the loader calls `reset()` at
-    # the start of a run, and an MCP server is a long-lived process that never
-    # does. Every entry it accumulates here is one this function is about to
-    # refuse and report, so nothing is lost by dropping it — and a list that
-    # only grows in a server that only runs is a leak whose contents nobody
-    # reads.
-    #
-    # Under a lock: this reads a length, calls `lit()`, then deletes by that
-    # length. An MCP server can serve two calls at once against one imported
-    # `etl.cypher`, so without it two `quoted()` calls interleave and one
-    # reports the other's reason as its own.
-    # `None` is refused; an int or float is still coerced, and the difference
-    # is deliberate.
+    # `None` and containers are refused; a number is still coerced, and the
+    # difference is deliberate.
     #
     # `None` used to map to `""`, so `regulations_for_product(None)` searched
-    # for the empty string and returned `found: False, error: None` — the third
-    # meaning in an empty answer this module exists to keep out, arriving
-    # through a different door. `regulation_for_clearance` had a type guard;
-    # the other four did not, and this covers all five in one place.
-    #
-    # But refusing every non-`str` would break something correct: every value
-    # these tools compare against is stored as TEXT, `device_class` included
-    # ("1", "2", "3", "N", "U", "f" — measured), so `device_class=2` MUST
-    # render as `"2"` rather than being rejected. A number has an unambiguous
-    # text meaning; `None` and a list do not.
-    # Control characters are refused HERE, because `lit()` collapses them to a
-    # space and records nothing in `SANITISED`. That is a hole in this
-    # function's whole invariant — "refuse anything `lit()` altered" — since
-    # the one alteration it cannot see is the one that silently changes the
-    # term being matched. Measured: `lit("a\nb")` returns `"a b"` with
-    # `SANITISED` untouched, so `regulations_for_product("a\nb")` searched for
-    # something the caller never asked for and returned an empty answer with
-    # `error: None`.
-    #
-    # Refusing before `lit()` runs is what closes it.
-    #
-    # C1 (U+0080–U+009F) is refused HERE and collapsed NOWHERE. Both this
-    # comment and `etl/cypher.py`'s claimed the loader collapses "the C0/C1
-    # ranges"; measured, neither does — `lit("a\x85b")` returns the C1 byte
-    # untouched. It round-trips through this engine unaltered (measured
-    # 2026-08-27), so this is prevention rather than correction: U+0085 is a
-    # line terminator to some parsers, every C1 is invisible in any UI a
-    # caller reads the answer in, and a term nobody can see is a term nobody
-    # can check. `etl/cypher.py` is left as it is — changing what a 54,000
-    # statement load writes is not this module's call — so the two encoders
-    # deliberately differ here, and both now say so.
-    if isinstance(value, str):
-        bad = [ch for ch in value
-               if ch < " " or "\x7f" <= ch <= "\x9f"
-               or ch in ("\u2028", "\u2029")]
-        if bad:
-            raise Unbounded(
-                f"the search term contains {len(bad)} control character(s), "
-                f"which cannot be sent as part of a Cypher string on this "
-                f"engine. They would be silently replaced with spaces and the "
-                f"term matched would not be the term asked for.")
-
-    # A BACKSLASH is refused, because two engine builds disagree about it and
-    # `/api/status` cannot tell them apart.
-    #
-    #   public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0   RETURN "C:\temp" -> C:\temp
-    #   samyama:1.7.0-oss-2a86307                     RETURN "C:\temp" -> C:<TAB>emp
-    #
-    # Both report `"version": "1.7.0"`. On the second, `quoted("C:\temp")`
-    # sends a literal the engine reads as `C:<TAB>emp`, so the term matched is
-    # not the term asked for: no rows, `error: None`, and an agent reads that
-    # as "no such device". That is the silent wrong answer this whole module
-    # exists to prevent, and it arrives through the encoder.
-    #
-    # Refused rather than escaped, because there is no escape that is correct
-    # on both: doubling it is right on the decoding build and wrong on the
-    # preserving one. Refusing is right on both, and it is free — measured
-    # across the loaded slice, **0 of 26,212 records** carry a backslash in
-    # any field these tools compare against (`regulation_number`,
-    # `product_code`, `device_class`, `medical_specialty`, `k_number`,
-    # `device_name`). No CFR section, product code or K-number contains one.
-    #
-    # This is what makes the module independent of which build it is pointed
-    # at, which matters more than the character: a repo cannot branch on a
-    # version string that does not distinguish the builds.
-    if isinstance(value, str) and "\\" in value:
-        raise Unbounded(
-            "the search term contains a backslash, which this module will not "
-            "send. Two Samyama-Graph builds both reporting version 1.7.0 "
-            "disagree about whether a backslash inside a string literal is an "
-            "escape: one preserves it and one decodes it, so the same term "
-            "matches different things depending on which engine answers, with "
-            "no error either way. No CFR section, product code or K-number "
-            "contains one.")
-
-    if isinstance(value, str) and not value.strip():
-        raise Unbounded(
-            "a search term cannot be empty. An empty string matches nothing "
-            "and returns the same empty answer as a term that genuinely has "
-            "no rows — the third meaning this module exists to keep out.")
-    # `True` is not a search term, and `str(True)` is `"True"`. Refused
-    # BEFORE the number branch, because `isinstance(True, int)` is true — the
-    # same reason `bounded()` checks it first. Every value these tools compare
-    # against is text like "1", "2", "N"; `"True"` matches none of them and
-    # returns the empty answer this module exists to keep out.
+    # for the empty string and returned `found: False, error: None`.
+    # `regulation_for_clearance` had a type guard; the other four did not, and
+    # this covers all five in one place.
     if isinstance(value, bool):
         raise Unbounded(
             f"a search term must be text or a number, got {value!r}. It would "
             f"be sent as the word \"{value}\", which matches nothing and "
             f"returns the same empty answer as a term that has no rows.")
-    # `2.0` rendered `"2.0"`, and `device_class` is stored as `"2"` — so a
-    # limit-free, error-free, silently empty answer for an argument that was
-    # right. JSON has no integer type distinct from float, so a caller sending
-    # 2 can arrive here as 2.0 through no fault of its own; an integral float
-    # is narrowed rather than refused. A fractional one is refused, because
-    # there is no text it could have meant.
     if isinstance(value, float):
         if not value.is_integer():
             raise Unbounded(
@@ -416,6 +294,47 @@ def quoted(value) -> str:
             f"a search term must be text or a number, got "
             f"{type(value).__name__}. An empty answer for a bad argument is "
             f"indistinguishable from an empty answer for a good one.")
+
+    # A BACKSLASH is refused, because two engine builds disagree about it and
+    # `/api/status` cannot tell them apart.
+    #
+    #   public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0   RETURN "C:\temp" -> C:\temp
+    #   samyama:1.7.0-oss-2a86307                     RETURN "C:\temp" -> C:<TAB>emp
+    #
+    # Both report `"version": "1.7.0"`. Refused rather than escaped, because
+    # no escaping is correct on both: doubling it is right on the decoding
+    # build and wrong on the preserving one. Query-side only — widening what a
+    # 54,000-statement load rewrites is a change to stored data.
+    if isinstance(value, str) and "\\" in value:
+        raise Unbounded(
+            "the search term contains a backslash, which this module will not "
+            "send. Two Samyama-Graph builds both reporting version 1.7.0 "
+            "disagree about whether a backslash inside a string literal is an "
+            "escape: one preserves it and one decodes it, so the same term "
+            "matches different things depending on which engine answers, with "
+            "no error either way. No CFR section, product code or K-number "
+            "contains one.")
+
+    # C1 (U+0080–U+009F) is refused HERE and collapsed nowhere. `lit()` leaves
+    # it untouched — measured — and it round-trips through the engine
+    # unaltered, so this is prevention rather than correction: U+0085 is a line
+    # terminator to some parsers, every C1 is invisible in any interface a
+    # caller reads an answer in, and a term nobody can see is one nobody can
+    # check. C0 and DEL are refused by `lit_exact` below, with everything else
+    # it cannot express exactly.
+    if isinstance(value, str) and any("\x7f" <= ch <= "\x9f" for ch in value):
+        raise Unbounded(
+            "the search term contains a control character, which cannot be "
+            "sent as part of a Cypher string on this engine. It would be "
+            "silently replaced and the term matched would not be the term "
+            "asked for.")
+
+    if isinstance(value, str) and not value.strip():
+        raise Unbounded(
+            "a search term cannot be empty. An empty string matches nothing "
+            "and returns the same empty answer as a term that genuinely has "
+            "no rows — the third meaning this module exists to keep out.")
+
     text = str(value)
     if len(text) > MAX_TERM:
         raise Unbounded(
@@ -423,18 +342,12 @@ def quoted(value) -> str:
             f"{MAX_TERM}. A term that long is an accidental paste rather than "
             f"a device identifier, and it would be sent as one statement.")
 
-    with _SANITISED_LOCK:
-        before = len(SANITISED)
-        literal = lit(text)
-        grew = len(SANITISED) > before
-        reason = SANITISED[-1].get("reason", "could not be expressed") if grew else None
-        del SANITISED[before:]
-    if grew:
+    try:
+        return lit_exact(text)
+    except Unrepresentable as exc:
         raise Unbounded(
-            f"the search term {value!r} {reason}, so it cannot be matched "
-            f"exactly. "
-            f"This engine has no escape sequence inside a string "
+            f"the search term {value!r} {exc.reason}, so it cannot be matched "
+            f"exactly. This engine has no escape sequence inside a string "
             f"literal, so a value holding both quote characters cannot be "
             f"written at all. Returning an error rather than a query that "
-            f"would find nothing and look like an empty answer.")
-    return literal
+            f"would find nothing and look like an empty answer.") from None

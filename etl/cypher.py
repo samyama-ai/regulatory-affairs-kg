@@ -30,34 +30,27 @@ def reset() -> None:
     SANITISED.clear()
 
 
-def lit(value) -> str:
-    """A Cypher string literal for Samyama-Graph 1.1.0.
+class Unrepresentable(Exception):
+    """A value this engine's literal syntax cannot express exactly.
 
-    Two engine facts make this harder than it looks, both measured:
+    Carries the reason and the value, because both callers report them: the
+    loader records the substitution it made, and the query side refuses and
+    names the term it would not send.
+    """
 
-    1. `/api/query` accepts only `query` and `graph` — **no parameters**. Every
-       value is interpolated into statement text, so this function is
-       load-bearing, not cosmetic.
+    def __init__(self, reason: str, original: str):
+        super().__init__(reason)
+        self.reason = reason
+        self.original = original
 
-    2. **The engine has no escape sequences inside string literals.** `\\"` and
-       `\\'` are parse errors, and `\\n` / `\\t` / `\\\\` pass through as literal
-       backslash-n, backslash-t, backslash-backslash rather than being decoded.
-       A literal is delimited by `"` or `'` and that delimiter simply cannot
-       appear inside it.
 
-    So the quote style is chosen per value rather than fixed. Double quotes by
-    default — apostrophes are far commoner in this corpus than double quotes
-    (377 values against 26). Single quotes when the value contains a double
-    quote. When it contains **both**, the value cannot be represented at all,
-    and the inner double quotes are replaced with typographic ones. That is a
-    real alteration of source data, so every instance is recorded and reported
-    rather than done silently. In this slice it happens twice, out of the
-    456,154 values a full load passes through here — measured 2026-08-13 by
-    counting the calls, not estimated.
+def _literal(value, altered) -> str:
+    """The literal, with every alteration routed through `altered`.
 
-    Newlines and tabs are collapsed to spaces — not for escaping, but because a
-    literal newline inside a statement breaks the parser and the engine offers
-    no way to encode one.
+    ONE implementation, two policies. `altered(reason, original,
+    substitute)` is called wherever this cannot express a value exactly and
+    returns what to use — so `lit()` records and continues while
+    `lit_exact()` raises, and neither re-derives what "exactly" means.
     """
     if value is None:
         return "null"
@@ -76,8 +69,8 @@ def lit(value) -> str:
         # ordinary. Recorded and written as null instead, because losing one
         # value loudly beats failing the run at row 12,000.
         if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-            SANITISED.append({"original": repr(value), "reason": "no Cypher literal for non-finite float"})
-            return "null"
+            return altered("no Cypher literal for non-finite float",
+                           repr(value), "null")
         return repr(value)
     if isinstance(value, dict):
         # A dict has no place as a property value, and `str()` on one produces
@@ -107,18 +100,87 @@ def lit(value) -> str:
     # 54,000-statement load rewrites is a change to stored data, not to a
     # comment. `mcp_server.engine.quoted` refuses C1 on the QUERY side, where
     # refusing costs nothing, and says so.
+    raw = str(value)
     text = "".join(
         " " if ch < " " or ch in ("\x7f", "\u2028", "\u2029") else ch
-        for ch in str(value)
+        for ch in raw
     )
+    if text != raw:
+        # Reported, and it never was. `lit()` collapsed these and recorded
+        # nothing, so the one alteration a "refuse anything lit() altered"
+        # invariant could not see was the one that silently changed the term
+        # being matched.
+        text = altered("contains a control character", raw[:200], text)
 
     if '"' not in text:
         return f'"{text}"'
     if "'" not in text:
         return f"'{text}'"
 
-    SANITISED.append({"original": text[:200], "reason": "contains both quote types"})
-    return '"' + text.replace('"', "”") + '"'
+    return altered("contains both quote types", text[:200],
+                   '"' + text.replace('"', "”") + '"')
+
+
+def lit(value) -> str:
+    """A Cypher string literal for Samyama-Graph 1.1.0.
+
+    Two engine facts make this harder than it looks, both measured:
+
+    1. `/api/query` accepts only `query` and `graph` — **no parameters**. Every
+       value is interpolated into statement text, so this function is
+       load-bearing, not cosmetic.
+
+    2. **The engine has no escape sequences inside string literals.** `\\"` and
+       `\\'` are parse errors, and `\\n` / `\\t` / `\\\\` pass through as literal
+       backslash-n, backslash-t, backslash-backslash rather than being decoded.
+       A literal is delimited by `"` or `'` and that delimiter simply cannot
+       appear inside it.
+
+    So the quote style is chosen per value rather than fixed. Double quotes by
+    default — apostrophes are far commoner in this corpus than double quotes
+    (377 values against 26). Single quotes when the value contains a double
+    quote. When it contains **both**, the value cannot be represented at all,
+    and the inner double quotes are replaced with typographic ones. That is a
+    real alteration of source data, so every instance is recorded and reported
+    rather than done silently. In this slice it happens twice, out of the
+    456,154 values a full load passes through here — measured 2026-08-13 by
+    counting the calls, not estimated.
+
+    Newlines and tabs are collapsed to spaces — not for escaping, but because a
+    literal newline inside a statement breaks the parser and the engine offers
+    no way to encode one.
+
+    Alterations are RECORDED and the substitute used, because a load that
+    stopped at row 12,000 over one unrepresentable value is worse than one
+    that reports two of them. `lit_exact` is this function with the
+    opposite policy.
+    """
+    def record(reason, original, substitute):
+        SANITISED.append({"original": original, "reason": reason})
+        return substitute
+
+    return _literal(value, record)
+
+
+def lit_exact(value) -> str:
+    """A literal that is EXACTLY the value, or `Unrepresentable`.
+
+    The query side's policy. Writing an altered value is a recorded,
+    reported compromise; MATCHING on one is not — the term compared against
+    is no longer the term asked for, so the query returns no rows and no
+    error, and a caller reads that as "no such record".
+
+    Touches no global and takes no lock, which is the point. Establishing
+    "was this altered?" by reading `len(SANITISED)`, calling `lit()`, then
+    deleting back to the length just read is one module trimming another
+    module's list — and the lock around it only ever covered callers
+    arriving through the first one, while `props` and `merge` append
+    without it.
+    """
+    def refuse(reason, original, substitute):
+        raise Unrepresentable(reason, original)
+
+    return _literal(value, refuse)
 
 
 def split_statements(text: str) -> list[str]:

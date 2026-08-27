@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import statistics
-import time
 import urllib.error
 import urllib.request
+
+from etl.transport import post_query
 
 
 URL = "http://localhost:8080"
@@ -61,24 +62,21 @@ REPEATS = 5     # median of five; a single timing on a warm cache is not a figur
 
 
 def run(cypher: str, url: str) -> tuple[dict, float]:
-    request = urllib.request.Request(
-        url + "/api/query",
-        data=json.dumps({"query": cypher}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    started = time.perf_counter()
+    """One statement, or `SystemExit` naming what went wrong.
+
+    The REQUEST is built by `etl.transport.post_query`; what a failure means is
+    decided here and nowhere else. This runner is a script, so a failure ends
+    it — which is the right policy for a script and the wrong one for the MCP
+    tools, which turn the same failures into a `Result` an agent can read.
+    """
     try:
-        # `with`: an unclosed response holds its socket until the garbage
-        # collector gets to it, and this runs one request per repeat per query.
-        with urllib.request.urlopen(request, timeout=180) as response:
-            payload = json.loads(response.read())
+        payload, elapsed = post_query(cypher=cypher, url=url, timeout=180)
     except urllib.error.HTTPError as exc:
         # Caught before URLError, which it subclasses — otherwise a 500 from a
         # running engine reports as "no engine".
         raise SystemExit(f"engine returned {exc.code}: {exc.read().decode()[:200]}")
     except urllib.error.URLError as exc:
         raise SystemExit(f"no engine at {url}: {exc.reason}")
-    elapsed = (time.perf_counter() - started) * 1000
     if "error" in payload:
         # `str(...)` first. `payload['error'][:200]` assumes a string: a dict
         # or a list slices to something unreadable, and an int raises

@@ -41,6 +41,7 @@ from pathlib import Path
 
 from etl import cypher
 from etl.cypher import SANITISED, lit, merge, split_statements
+from etl.transport import post_query
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCHEMA = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
@@ -71,14 +72,14 @@ class Engine:
         """
         if attempts < 1:
             raise ValueError("attempts must be at least 1")
-        payload = json.dumps({"query": query, "graph": self.graph}).encode()
         for attempt in range(attempts):
-            request = urllib.request.Request(
-                f"{self.url}/api/query", data=payload,
-                headers={"Content-Type": "application/json"},
-            )
             try:
-                result = json.loads(urllib.request.urlopen(request, timeout=120).read())
+                # The request comes from `etl.transport.post_query`; the retry
+                # policy below is this loader's alone. A load is a batch nobody
+                # is watching, so a transient failure is worth retrying — the
+                # MCP tools, answering an agent, must not.
+                result, _ = post_query(cypher=query, url=self.url,
+                                       graph=self.graph, timeout=120)
                 break
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode()[:300]
@@ -442,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
                     "statements_issued": issued,
                     "unresolvable_product_codes": unresolvable, **graph}, indent=2)
     )
-    print(f"\n  report -> data/load-report.json")
+    print("\n  report -> data/load-report.json")
     return 0
 
 

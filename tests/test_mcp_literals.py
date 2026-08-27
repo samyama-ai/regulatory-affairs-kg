@@ -205,3 +205,59 @@ def test_a_c1_control_character_is_refused_like_every_other_one():
     assert engine.quoted("a\xa0b"), (
         "U+00A0 is a non-breaking space, not a control character; refusing it "
         "would reject a term a source could legitimately carry")
+
+
+def test_refusing_a_term_touches_no_global_and_takes_no_lock():
+    """`quoted()` used to establish "did `lit()` alter this?" by watching a
+    list another module owns.
+
+    It read `len(SANITISED)`, called `lit()`, then deleted back to the length
+    it had read — under a lock that only covered callers arriving through
+    `engine.py`, while `etl.cypher.props` and `merge` append without one. Safe
+    today only because the loader and the server are separate processes; the
+    ownership was inverted either way.
+
+    `lit_exact` raises instead, so there is nothing to watch and nothing to
+    trim. Asserted on the global rather than on the refusal, because the
+    refusal worked before too — what changed is what it cost.
+    """
+    from etl import cypher
+
+    before = list(cypher.SANITISED)
+    for term in ('a"b\'c', "a\nb", float("inf")):
+        with pytest.raises(engine.Unbounded):
+            engine.quoted(term)
+    assert cypher.SANITISED == before, (
+        "refusing a term left entries in the loader's SANITISED list, or "
+        "removed ones it had already recorded")
+
+    # And a term that IS representable does not record anything either.
+    assert engine.quoted("870.5150")
+    assert cypher.SANITISED == before
+
+    assert not hasattr(engine, "_SANITISED_LOCK"), (
+        "the lock is still here, so something still mutates a global it does "
+        "not own")
+
+
+def test_a_control_character_is_reported_by_the_loader_not_only_refused():
+    """The hole the watching could never close.
+
+    `lit()` collapsed control characters to a space and recorded NOTHING, so
+    the one alteration `quoted()`'s "refuse anything `lit()` altered"
+    invariant could not see was the one that silently changed the term being
+    matched. Both halves are fixed by the same split: the loader records the
+    collapse, and the query side refuses it.
+    """
+    from etl import cypher
+
+    cypher.reset()
+    assert cypher.lit("a\nb") == '"a b"', "the loader still collapses, as it must"
+    assert cypher.SANITISED, (
+        "the loader collapsed a control character and recorded nothing, so a "
+        "load report cannot say it happened")
+    assert "control character" in cypher.SANITISED[-1]["reason"]
+    cypher.reset()
+
+    with pytest.raises(engine.Unbounded):
+        engine.quoted("a\nb")

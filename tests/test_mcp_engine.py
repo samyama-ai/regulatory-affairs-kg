@@ -344,3 +344,59 @@ def test_the_engine_url_is_read_once_per_call():
     assert len(reads) == 1, (
         f"the engine URL was read {len(reads)} times for one call; the second "
         f"read is in the error path, where it can raise")
+
+
+def test_every_client_builds_its_request_the_same_way():
+    """Four modules constructed an identical `/api/query` POST, and a fix has
+    already landed in one of them and not another — `benchmarks/measure.py`
+    carries a comment saying so about a sibling it cannot enforce.
+
+    Read from the AST, so this cannot be satisfied by the words appearing in a
+    docstring. What is asserted is that nobody builds the request themselves,
+    not that they all call the helper — a fifth module that hand-rolls one is
+    the failure, whatever it does afterwards.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(engine.__file__).resolve().parents[1]
+    clients = ["benchmarks/measure.py", "demo/demo.py", "etl/load_openfda.py",
+               "mcp_server/engine.py"]
+    offenders = []
+    for name in clients:
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if "/api/query" in node.value:
+                offenders.append(f"{name}:{node.lineno}")
+    assert not offenders, (
+        f"{offenders} build the /api/query request themselves. The request is "
+        f"`etl.transport.post_query`; what a FAILURE means stays with each "
+        f"caller, which is the part that genuinely differs.")
+
+    # And the helper is reached by all four, so the check above is not passing
+    # because they stopped talking to the engine.
+    for name in clients:
+        source = (root / name).read_text(encoding="utf-8")
+        assert "post_query" in source, f"{name} no longer sends anything"
+
+
+def test_each_client_keeps_its_own_failure_policy():
+    """The half that must NOT be shared.
+
+    The loader retries and raises; the MCP tools return a `Result` an agent
+    can read; the benchmark runner exits; the demo prints in colour and stops.
+    A shared helper that decided what a failure meant would be a fifth policy
+    rather than the end of the duplication — so `post_query` catches nothing,
+    and this pins that.
+    """
+    import inspect
+
+    from etl import transport
+
+    source = inspect.getsource(transport.post_query)
+    assert "except" not in source, (
+        "post_query catches something. Four callers want four different "
+        "things on failure; a helper that decides for them replaces four "
+        "policies with a fifth.")
