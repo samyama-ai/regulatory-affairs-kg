@@ -20,16 +20,6 @@ import pytest
 from mcp_server import engine
 
 
-def configured_test_url() -> str | None:
-    """Only `SAMYAMA_TEST_URL`. Never `SAMYAMA_URL`, never a default.
-
-    A test that writes and deletes must not be able to find an engine by
-    accident. Requiring its own variable means pointing these at a loaded graph
-    has to be a decision somebody typed.
-    """
-    return os.environ.get("SAMYAMA_TEST_URL")
-
-
 def engine_available(url: str) -> bool:
     try:
         urllib.request.urlopen(f"{url}/api/tenants", timeout=2).read()
@@ -68,6 +58,21 @@ def writable_test_engine(what: str) -> str:
     suite went unrun is the same problem one layer up.
     """
     url = os.environ.get("SAMYAMA_TEST_URL")
+
+    # The PORT is refused FIRST, before anything asks whether the engine is
+    # up. Ordered the other way round the refusal was conditional on
+    # reachability: with the demo engine stopped, naming 8080 skipped with "no
+    # engine at http://localhost:8080" rather than failing with "8080 is where
+    # a demo engine runs". The developer starts the engine, re-runs, and only
+    # then learns the port is banned — so the behaviour depended on timing,
+    # and "refused outright even if you name it" was true only when the engine
+    # happened to be up.
+    if url and (urllib.parse.urlparse(url).port or 80) == 8080:
+        pytest.fail(
+            f"SAMYAMA_TEST_URL is {url}. Port 8080 is where a demo engine "
+            f"runs, and {what} WRITES to whatever it is pointed at. Use a "
+            f"different port.")
+
     if not url or not engine_available(url):
         message = (f"{what}: no engine at SAMYAMA_TEST_URL" if not url
                    else f"{what}: no engine at {url}")
@@ -76,11 +81,6 @@ def writable_test_engine(what: str) -> str:
                 f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
         pytest.skip(f"{message} — set it to a FRESH instance, never the demo engine")
 
-    if (urllib.parse.urlparse(url).port or 80) == 8080:
-        pytest.fail(
-            f"SAMYAMA_TEST_URL is {url}. Port 8080 is where a demo engine "
-            f"runs, and {what} WRITES to whatever it is pointed at. Use a "
-            f"different port.")
     return url
 
 

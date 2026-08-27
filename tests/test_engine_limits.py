@@ -81,16 +81,26 @@ def run(query: str, url: str | None = None) -> dict:
 
 @pytest.fixture
 def node():
-    """One node with a known value, cleaned up after. Keyed per run."""
-    require_engine()
+    """One node with a known value, cleaned up after. Keyed per run.
+
+    Yields `(key, url)`. The URL is RESOLVED ONCE and threaded through, for
+    two reasons. Resolving per call meant every query paid an extra
+    `/api/tenants` round trip with a 2-second timeout — one guard call per
+    statement, in a fixture that runs several. And teardown calls `run()`
+    too: if the engine dropped mid-test, `require_engine()` raised `Skipped`
+    from inside the teardown, which surfaces as a teardown ERROR rather than
+    a clean skip and buries whatever the test was actually reporting.
+    """
+    url = require_engine()
     key = f"LIMIT-{uuid4().hex[:8].upper()}"
-    run(f'CREATE (n:LimitProbe {{id: "{key}", txt: "before"}})')
-    yield key
-    run(f'MATCH (n:LimitProbe) WHERE n.id = "{key}" DETACH DELETE n')
+    run(f'CREATE (n:LimitProbe {{id: "{key}", txt: "before"}})', url)
+    yield key, url
+    run(f'MATCH (n:LimitProbe) WHERE n.id = "{key}" DETACH DELETE n', url)
 
 
-def value_of(key: str):
-    records = run(f'MATCH (n:LimitProbe) WHERE n.id = "{key}" RETURN n.txt')["records"]
+def value_of(key: str, url: str):
+    records = run(f'MATCH (n:LimitProbe) WHERE n.id = "{key}" RETURN n.txt',
+                  url)["records"]
     return records[0][0] if records and records[0] else None
 
 
@@ -112,9 +122,10 @@ def test_a_property_cannot_be_cleared(node, form):
     ON MATCH branch, and drop the "last populated value wins" caveat from
     DATASET-CARD.md.
     """
-    result = run(form.format(key=node))
+    node, url = node
+    result = run(form.format(key=node), url)
     assert "error" not in result, f"the statement itself was rejected: {result}"
-    assert value_of(node) == "before", (
+    assert value_of(node, url) == "before", (
         "SET = null now clears a property — see this test's docstring, the "
         "loader can stop working around it"
     )
@@ -125,8 +136,9 @@ def test_a_property_can_be_overwritten_with_a_real_value(node):
     could pass because SET does nothing at all rather than because null
     specifically is ignored — and a failure here is a real problem rather than
     the engine having improved."""
-    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.txt = "after"')
-    assert value_of(node) == "after", "SET does not persist at all — a bigger problem"
+    node, url = node
+    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.txt = "after"', url)
+    assert value_of(node, url) == "after", "SET does not persist at all — a bigger problem"
 
 
 def test_numbers_and_booleans_survive_as_themselves(node):
@@ -135,7 +147,8 @@ def test_numbers_and_booleans_survive_as_themselves(node):
 
     NOT an `engine_limitation`: this asserts what the loader needs to stay
     true, so a failure is a regression rather than good news."""
-    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.num = 42, n.flag = true')
+    node, url = node
+    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.num = 42, n.flag = true', url)
     records = run(
         f'MATCH (n:LimitProbe) WHERE n.id = "{node}" RETURN n.num, n.flag'
     )["records"]
@@ -146,11 +159,12 @@ def test_numbers_and_booleans_survive_as_themselves(node):
 def test_numeric_comparison_needs_a_numeric_property(node):
     """The reason `lit()` stopped quoting numbers: a numeric filter works
     against a number and is rejected against the string form."""
-    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.num = 42, n.numtext = "42"')
-    ok = run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" AND n.num > 40 RETURN count(n)')
+    node, url = node
+    run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.num = 42, n.numtext = "42"', url)
+    ok = run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" AND n.num > 40 RETURN count(n)', url)
     assert "error" not in ok and ok["records"][0][0] == 1, ok
 
-    bad = run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" AND n.numtext > 40 RETURN count(n)')
+    bad = run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" AND n.numtext > 40 RETURN count(n)', url)
     assert "error" in bad, (
         "the engine now compares a numeric string against a number — quoting "
         "numbers would no longer break filtering, though it is still wrong"

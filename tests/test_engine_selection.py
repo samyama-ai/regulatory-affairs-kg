@@ -16,9 +16,36 @@ on this engine does more than remove what it names.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 from _pytest.outcomes import Failed, Skipped
+
+
+def refuses(what: str, *, because: str) -> str:
+    """Call the guard and require it to FAIL — never skip, never return.
+
+    `pytest.raises(Failed)` is not enough anywhere in this file. `Skipped` is
+    a BaseException too, it is not `Failed`, and one raised inside a
+    `pytest.raises(Failed)` block propagates and SKIPS THE TEST rather than
+    failing it. A guard that starts skipping where it should fail therefore
+    turns every assertion about it into a green skip — which is this file's
+    own subject, one level up.
+
+    That happened twice while writing this file. The helper exists so it
+    cannot happen a third time.
+    """
+    from tests import mcp_support
+
+    try:
+        got = mcp_support.writable_test_engine(what)
+    except Failed as exc:
+        assert because in str(exc), (
+            f"refused, but not for the stated reason: {str(exc)[:140]}")
+        return str(exc)
+    except Skipped as exc:
+        pytest.fail(f"the guard SKIPPED where it must fail ({because}): {exc}")
+    pytest.fail(f"the guard returned {got!r} where it must fail ({because})")
 
 
 def test_a_writing_test_cannot_find_an_engine_without_being_told(monkeypatch):
@@ -47,10 +74,19 @@ def test_a_writing_test_cannot_find_an_engine_without_being_told(monkeypatch):
 
     # 2. Port 8080 is refused even when it IS typed — a demo engine is the one
     #    a developer most likely has running.
+    #    Refused whether or not anything is LISTENING there, which is the
+    #    part that was broken: the port check ran after the reachability
+    #    check, so with the demo engine stopped, naming 8080 skipped rather
+    #    than failed — and this test stubbed `engine_available` to True for
+    #    its whole body, so it could not see that.
     monkeypatch.setenv("SAMYAMA_TEST_URL", "http://localhost:8080")
-    with pytest.raises(Failed) as refused:
-        mcp_support.writable_test_engine("a writing suite")
-    assert "8080" in str(refused.value) and "WRITES" in str(refused.value)
+    for reachable in (True, False):
+        monkeypatch.setattr(mcp_support, "engine_available",
+                            lambda url, r=reachable: r)
+        message = refuses("a writing suite", because="8080")
+        assert "WRITES" in message, (
+            f"the refusal does not say why, with reachable={reachable}")
+    monkeypatch.setattr(mcp_support, "engine_available", lambda url: True)
 
     # 3. And the skip becomes a failure when CI demands the engine ran, since
     #    a guard that skips is indistinguishable from one that passes.
@@ -62,16 +98,7 @@ def test_a_writing_test_cannot_find_an_engine_without_being_told(monkeypatch):
     #    suite green with one more skip and nothing to say why.
     monkeypatch.delenv("SAMYAMA_TEST_URL", raising=False)
     monkeypatch.setenv("SAMYAMA_REQUIRE_ENGINE", "1")
-    try:
-        mcp_support.writable_test_engine("a writing suite")
-    except Failed:
-        pass
-    except Skipped:
-        pytest.fail(
-            "SAMYAMA_REQUIRE_ENGINE=1 skipped instead of failing, so CI would "
-            "report green for an engine-backed suite that never ran")
-    else:
-        pytest.fail("an unset SAMYAMA_TEST_URL returned a URL")
+    refuses("a writing suite", because="SAMYAMA_REQUIRE_ENGINE=1")
 
     # A port that is not 8080 is accepted, so the guard refuses the hazard
     # rather than refusing everything.
@@ -89,14 +116,25 @@ def test_no_test_module_reaches_for_an_engine_by_default():
     """
     offenders = []
     here = pathlib.Path(__file__).resolve().parent
-    # Assembled, so this file does not match its own pattern — a sweep that
-    # excludes itself by name stops working the day it moves.
-    needle = "environ.get(" + chr(34) + "SAMYAMA_URL" + chr(34)
-    for path in sorted(here.glob("*.py")):
+    # A REGEX over every way of READING the variable, and `rglob`, because
+    # this check is for the module nobody has written yet rather than the
+    # three fixed here. It matched only `environ.get("SAMYAMA_URL"` — double
+    # quotes, `.get`, and `tests/*.py` non-recursively — so
+    # `os.environ['SAMYAMA_URL']`, `os.getenv("SAMYAMA_URL")` and anything in
+    # a subdirectory walked past a guard advertising a blanket ban.
+    #
+    # This file is excluded by resolved path, which is what actually keeps it
+    # from matching itself; the old `chr(34)` assembly was a second mechanism
+    # for the same thing, and its comment claimed to be the one that worked.
+    reads = re.compile(
+        r"""(?:environ\s*\[|environ\.get\(|getenv\()\s*["']SAMYAMA_URL["']""")
+    for path in sorted(here.rglob("*.py")):
+        if path.resolve() == pathlib.Path(__file__).resolve():
+            continue
         code = "\n".join(line.split("#")[0]
                          for line in path.read_text(encoding="utf-8").splitlines())
-        if needle in code and path.resolve() != pathlib.Path(__file__).resolve():
-            offenders.append(path.name)
+        if reads.search(code):
+            offenders.append(str(path.relative_to(here)))
     assert not offenders, (
         f"{offenders} select an engine from SAMYAMA_URL. That is the variable "
         f"pointing at a demo or a loaded graph; a test that writes must read "
