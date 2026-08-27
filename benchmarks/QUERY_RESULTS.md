@@ -1,6 +1,6 @@
 # Regulatory Affairs KG — query results
 
-> Measured 2026-08-27T04:02:34+00:00 · Samyama-Graph **1.7.0** (image `public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0`) · local Docker
+> Measured 2026-08-27T06:55:31+00:00 · Samyama-Graph **1.7.0** (image `public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0`) · local Docker
 > 28,496 nodes, 25,310 edges
 
 **Timings are client round-trip, not engine execution time.** The clock
@@ -42,13 +42,13 @@ see [`../DATASET-CARD.md`](../DATASET-CARD.md) for what was loaded and why.
 
 **A rule changes. Which clearances are affected?**
 
-The question this graph exists for. Two hops, because `regulation_number` is on the clearance record itself — an exact government-issued join, not a name match. In a relational schema this is the query that needs the join written by hand each time the shape of the question changes.
+The question this graph exists for. Two hops, THROUGH THE PRODUCT CODE — this text used to say the join runs on the clearance's own `regulation_number`, and the Cypher below has never touched that property. Both are exact joins on government-issued codes, but they are different paths. Measured on the loaded graph: all 19,127 clearances are reachable this way and the regulation reached matches the one on the record every time. In a relational schema this is the query that needs the join written by hand each time the shape of the question changes.
 
 ```cypher
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN count(s) AS clearances
 ```
 
-**6.6 ms** median of 5 (min 4.4, max 8.9)
+**6.2 ms** median of 5 (min 5.3, max 7.5)
 
 | clearances |
 |---|
@@ -65,7 +65,7 @@ The same traversal, returning rows rather than a count.
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN s.id AS clearance, s.applicant AS applicant, s.decision_date AS decided ORDER BY s.decision_date DESC LIMIT 5
 ```
 
-**7.2 ms** median of 5 (min 4.3, max 9.5)
+**7.3 ms** median of 5 (min 4.6, max 9.0)
 
 | clearance | applicant | decided |
 |---|---|---|
@@ -86,7 +86,7 @@ An aggregation across the whole graph. Answers which rules carry the most cleara
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) RETURN r.cfr_section AS cfr_section, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**21.8 ms** median of 5 (min 21.1, max 22.2)
+**21.4 ms** median of 5 (min 21.2, max 22.1)
 
 | cfr_section | clearances |
 |---|---|
@@ -112,7 +112,7 @@ One hop from the join hub. `product_code` is on every openFDA endpoint; device *
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.product_code = 'DXY' RETURN p.definition AS device_category, p.device_class AS class, r.cfr_section AS cfr_section
 ```
 
-**1.2 ms** median of 5 (min 1.2, max 1.5)
+**1.3 ms** median of 5 (min 1.2, max 1.3)
 
 | device_category | class | cfr_section |
 |---|---|---|
@@ -129,7 +129,7 @@ The reverse of the above, and the first half of a change-impact answer.
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE r.cfr_section = '870.5150' RETURN p.product_code AS product_code, p.definition AS category LIMIT 10
 ```
 
-**1.2 ms** median of 5 (min 1.2, max 1.3)
+**1.2 ms** median of 5 (min 1.2, max 1.4)
 
 | product_code | category |
 |---|---|
@@ -151,7 +151,7 @@ A point lookup through two hops — the query an inspector runs.
 MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE s.id = 'K233820' RETURN s.device_name AS device, p.product_code AS product_code, r.cfr_section AS cfr_section
 ```
 
-**1.2 ms** median of 5 (min 1.2, max 1.2)
+**1.2 ms** median of 5 (min 1.2, max 1.3)
 
 | device | product_code | cfr_section |
 |---|---|---|
@@ -168,7 +168,7 @@ A grouping over 19,127 submissions. **The distribution is an artifact of the sli
 MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL RETURN s.advisory_committee AS committee, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**16.5 ms** median of 5 (min 15.9, max 27.4)
+**22.0 ms** median of 5 (min 16.9, max 25.1)
 
 | committee | clearances |
 |---|---|
@@ -186,7 +186,7 @@ A filtered scan with a join — the population a reviewer starts from. It is NOT
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.device_class = '3' RETURN count(DISTINCT p) AS class_three_with_a_regulation
 ```
 
-**8.3 ms** median of 5 (min 7.9, max 10.9)
+**9.7 ms** median of 5 (min 8.9, max 10.9)
 
 | class_three_with_a_regulation |
 |---|
@@ -203,7 +203,7 @@ The question a reviewer asks before trusting any answer above. Every node carrie
 MATCH (n) WHERE n.source IS NOT NULL RETURN n.source AS source, count(n) AS nodes ORDER BY nodes DESC
 ```
 
-**26.9 ms** median of 5 (min 22.8, max 27.9)
+**26.4 ms** median of 5 (min 22.1, max 47.2)
 
 | source | nodes |
 |---|---|
@@ -245,7 +245,7 @@ has nothing unindexed left to measure and correctly refuses.
 
 ## What the timings mean
 
-The slowest query here is **provenance** at 26.9 ms. Every query is a median of 5 runs,
+The slowest query here is **provenance** at 26.4 ms. Every query is a median of 5 runs,
 because a single reading on a warm cache is not a measurement.
 
 These are **not** a comparison against another database. Nothing here has

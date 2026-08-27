@@ -153,8 +153,12 @@ def report(url: str, with_index_effect: bool = True) -> str:
 
     indexed_before = existing_indexes(url)
 
-    # Re-derived every run. See the section it feeds.
-    constraint = constraint_indexes(url)
+    # Gated on the SAME flag as the index comparison, because it writes too:
+    # it declares a constraint on a probe label, and `--print` promises a dry
+    # run. Running it unconditionally made `--print` mutate the graph — the
+    # promise this file had just been fixed to keep, broken by the probe added
+    # to keep a different one.
+    constraint = constraint_indexes(url) if with_index_effect else None
 
     measured = [measure(q, url) for q in QUERIES]
 
@@ -249,7 +253,15 @@ def report(url: str, with_index_effect: bool = True) -> str:
         "rather than asserted.",
         "",
     ]
-    if constraint["indexed_by_constraint"]:
+    if constraint is None:
+        lines += [
+            "_Not measured on this run._ Answering this declares a constraint on a "
+            "probe label, which writes to the graph — and `--print` is a dry run. "
+            "Pass `--with-index-effect` to measure it, against an instance you are "
+            "willing to change.",
+            "",
+        ]
+    elif constraint["indexed_by_constraint"]:
         lines += [
             f"**On this engine it does.** A constraint declared on a probe label produced "
             f"a `{constraint['entry'].get('type', 'index')}` entry in `SHOW INDEXES` "
@@ -307,7 +319,7 @@ def report(url: str, with_index_effect: bool = True) -> str:
     if measured_keys:
         lines += [
             "The speedup tracks label size almost exactly, which is what a full scan",
-            "looks like. The schema already records that a constraint in 1.1.0 declares",
+            f"looks like. The schema already records that a constraint in {version} declares",
             "the key rather than guarding an insert; it does not index it either, and",
             "that had not been measured until now.",
             "",

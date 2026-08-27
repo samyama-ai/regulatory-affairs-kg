@@ -362,7 +362,6 @@ def test_the_unindexed_claim_is_not_made_on_a_run_where_it_is_false(monkeypatch)
     timings an order of magnitude faster under a sentence saying they are
     unindexed, and the default invocation is what creates those indexes.
     """
-    fresh = bench.report("http://x") if False else None  # documented below
     stub_report(monkeypatch)
     fresh = bench.report("http://x")
     assert "is the **unindexed** figure" in fresh, (
@@ -432,3 +431,38 @@ def test_the_page_stamps_the_version_the_engine_reports(monkeypatch):
         "keeping both is what stops the two being confused again")
 
 
+def test_the_dry_run_writes_nothing_at_all(monkeypatch):
+    """`--print` is a dry run, and the constraint probe broke that.
+
+    Answering "does a constraint create an index?" requires DECLARING a
+    constraint, which writes. Added unconditionally, it mutated the graph on
+    exactly the path this file had just been fixed to keep clean — a probe
+    added to keep one promise breaking another.
+    """
+    ran = []
+    stub_report(monkeypatch,
+                index_effect=lambda url, sizes: ran.append("index") or [],
+                constraint=None)
+    monkeypatch.setattr(bench, "constraint_indexes",
+                        lambda url: ran.append("constraint") or {
+                            "label": "P", "indexed_by_constraint": True,
+                            "entry": {"type": "BTREE"}})
+
+    page = bench.report("http://x", with_index_effect=False)
+    assert ran == [], (
+        f"a dry run called {ran} — both of those write to the graph")
+    assert "Not measured on this run" in page
+    assert "probe label" in page, (
+        "the page does not say WHY the constraint question went unanswered, "
+        "so a reader cannot tell a dry run from an engine that said no")
+
+
+def test_the_measuring_run_still_answers_the_constraint_question(monkeypatch):
+    """The other half: with the flag set, the finding is reported. Gating it
+    must not quietly remove the page's headline."""
+    stub_report(monkeypatch, constraint={
+        "label": "P", "indexed_by_constraint": True,
+        "entry": {"label": "P", "property": "p", "type": "BTREE"}})
+    page = bench.report("http://x", with_index_effect=True)
+    assert "On this engine it does." in page
+    assert "BTREE" in page

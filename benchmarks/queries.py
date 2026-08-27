@@ -18,9 +18,14 @@ QUERIES: list[dict] = [
     {
         "name": "Change impact — every clearance under one rule",
         "question": "A rule changes. Which clearances are affected?",
-        "why": ("The question this graph exists for. Two hops, because "
-                "`regulation_number` is on the clearance record itself — an exact "
-                "government-issued join, not a name match. In a relational schema "
+        "why": ("The question this graph exists for. Two hops, THROUGH THE "
+                "PRODUCT CODE — this text used to say the join runs on the "
+                "clearance's own `regulation_number`, and the Cypher below has "
+                "never touched that property. Both are exact joins on "
+                "government-issued codes, but they are different paths. "
+                "Measured on the loaded graph: all {submissions:,} clearances are "
+                "reachable this way and the regulation reached matches the one "
+                "on the record every time. In a relational schema "
                 "this is the query that needs the join written by hand each time "
                 "the shape of the question changes."),
         "cypher": ("MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)"
