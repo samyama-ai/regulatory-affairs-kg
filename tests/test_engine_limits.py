@@ -26,7 +26,7 @@ from uuid import uuid4
 
 import pytest
 
-from mcp_server.engine import quoted
+from mcp_server.engine import Unbounded, quoted
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 
@@ -133,44 +133,50 @@ def test_numeric_comparison_needs_a_numeric_property(node):
     )
 
 
-def test_a_backslash_is_not_an_escape_character():
-    """The fact every Cypher literal in this repo is encoded around.
+def test_a_backslash_cannot_reach_the_engine_whichever_build_this_is():
+    """Two builds report version 1.7.0 and disagree about backslashes.
 
-    `etl.cypher.lit` chooses the quote style per value rather than escaping,
-    because a backslash escapes nothing here: `\\n` inside a literal is a
-    backslash followed by an n, not a newline. Nothing else in the suite would
-    notice if that changed.
+        public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0   RETURN "C:\\temp" -> C:\\temp
+        samyama:1.7.0-oss-2a86307                     RETURN "C:\\temp" -> C:<TAB>emp
 
-    And it would change silently. If a build starts decoding escapes,
-    `quoted("C:\\temp")` sends `C:` then `\\t`, the engine reads a TAB, and the
-    term matched is not the term asked for: no rows, no error, and an agent
-    reads the empty answer as "no such device". The whole of `mcp_server`
-    exists to keep that third meaning out of an empty list, and this is the
-    door it would come through.
+    Measured on both. `/api/status` returns `"1.7.0"` for each, so nothing the
+    repo can read tells them apart — and on the second, `quoted("C:\\temp")`
+    sends a literal the engine reads as `C:<TAB>emp`. The term matched is not
+    the term asked for: no rows, `error: None`, and an agent reads that as "no
+    such device".
 
-    Both directions, because they can diverge: what the parser accepts inside
-    a literal, and what a stored value matches back against. Measured
-    2026-08-27 on the engine reporting 1.7.0 — both hold.
+    **This test asserted the first behaviour and would have failed on the
+    second**, turning an engine difference into what reads like a repo defect.
+    Worse, it would have passed on this box while the bug was live on another.
+
+    So the assertion moved off the engine and onto the encoder, which is the
+    only part this repo controls. `quoted()` refuses a backslash, so neither
+    behaviour can reach a query and the module is correct on both builds
+    without knowing which it is talking to. There is no escaping that would
+    be: doubling the backslash is right on the decoding build and wrong on the
+    preserving one.
+
+    The engine half is still checked, because a THIRD behaviour is the thing
+    nobody would notice — it asserts the running build does one of the two
+    recorded things, and names what it did if not.
     """
     require_engine()
-    for term in ("C:\\temp", "50\\%", "a\\nb"):
-        literal = quoted(term)
-        returned = run(f"RETURN {literal}")["records"]
-        assert returned and returned[0][0] == term, (
-            f"the engine decoded an escape in {literal}: it returned "
-            f"{returned and returned[0][0]!r} for the term {term!r}. Every "
-            f"literal in this repo is written on the assumption that it does "
-            f"not, so `quoted()` must now refuse a backslash rather than "
-            f"send one that changes the value silently.")
 
-        key = f"ESC-{uuid4().hex[:8].upper()}"
-        run(f'CREATE (n:EscapeProbe {{id: "{key}", txt: {literal}}})')
-        try:
-            back = run(f"MATCH (n:EscapeProbe) WHERE n.id = \"{key}\" AND "
-                       f"n.txt = {literal} RETURN count(n)")["records"]
-            assert back and back[0][0] == 1, (
-                f"{term!r} was stored as something the literal it was written "
-                f"with no longer matches, so a search for it returns an empty "
-                f"answer with no error.")
-        finally:
-            run(f'MATCH (n:EscapeProbe) WHERE n.id = "{key}" DETACH DELETE n')
+    # Engine-independent, and the part that makes the rest moot.
+    for term in ("C:\\temp", "50\\%", "a\\nb"):
+        with pytest.raises(Unbounded):
+            quoted(term)
+
+    # And this is why it has to. `quoted()` will not build this literal, so
+    # the statement is written out here deliberately.
+    records = run('RETURN "C:\\temp"')["records"]
+    assert records and records[0], (
+        "the engine did not answer a backslash literal at all — a third "
+        "behaviour, and the one that would go unnoticed")
+
+    preserved, decoded = "C:\\temp", "C:\temp"
+    assert records[0][0] in (preserved, decoded), (
+        f"this build returned {records[0][0]!r} for a backslash literal. The "
+        f"two builds measured on 2026-08-27 returned {preserved!r} and "
+        f"{decoded!r}; this is neither, so a third handling has appeared and "
+        f"the refusal in `quoted()` should be re-checked against it.")

@@ -350,6 +350,39 @@ def quoted(value) -> str:
                 f"engine. They would be silently replaced with spaces and the "
                 f"term matched would not be the term asked for.")
 
+    # A BACKSLASH is refused, because two engine builds disagree about it and
+    # `/api/status` cannot tell them apart.
+    #
+    #   public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0   RETURN "C:\temp" -> C:\temp
+    #   samyama:1.7.0-oss-2a86307                     RETURN "C:\temp" -> C:<TAB>emp
+    #
+    # Both report `"version": "1.7.0"`. On the second, `quoted("C:\temp")`
+    # sends a literal the engine reads as `C:<TAB>emp`, so the term matched is
+    # not the term asked for: no rows, `error: None`, and an agent reads that
+    # as "no such device". That is the silent wrong answer this whole module
+    # exists to prevent, and it arrives through the encoder.
+    #
+    # Refused rather than escaped, because there is no escape that is correct
+    # on both: doubling it is right on the decoding build and wrong on the
+    # preserving one. Refusing is right on both, and it is free — measured
+    # across the loaded slice, **0 of 26,212 records** carry a backslash in
+    # any field these tools compare against (`regulation_number`,
+    # `product_code`, `device_class`, `medical_specialty`, `k_number`,
+    # `device_name`). No CFR section, product code or K-number contains one.
+    #
+    # This is what makes the module independent of which build it is pointed
+    # at, which matters more than the character: a repo cannot branch on a
+    # version string that does not distinguish the builds.
+    if isinstance(value, str) and "\\" in value:
+        raise Unbounded(
+            "the search term contains a backslash, which this module will not "
+            "send. Two Samyama-Graph builds both reporting version 1.7.0 "
+            "disagree about whether a backslash inside a string literal is an "
+            "escape: one preserves it and one decodes it, so the same term "
+            "matches different things depending on which engine answers, with "
+            "no error either way. No CFR section, product code or K-number "
+            "contains one.")
+
     if isinstance(value, str) and not value.strip():
         raise Unbounded(
             "a search term cannot be empty. An empty string matches nothing "

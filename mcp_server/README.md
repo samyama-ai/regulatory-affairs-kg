@@ -4,10 +4,20 @@ Eight tools over the loaded graph. Every one runs a traversal that
 `demo/demo.py` already proves works on real FDA data.
 
 The image tag is `1.1.0`; the engine behind it reports **1.7.0** on
-`/api/status`. Nothing here is written against either number — every engine
-behaviour these tools depend on is asserted against the running engine by
-`tests/test_engine_limits.py`, because a limitation recorded as "1.1.0 cannot
-do X" names a version nobody is running and so never goes stale visibly.
+`/api/status`. Nothing here is written against either number.
+
+That is not tidiness. **Two builds both reporting 1.7.0 answer the same query
+differently** — `RETURN "C:\temp"` gives back `C:\temp` on the ECR image and
+`C:<TAB>emp` on `samyama:1.7.0-oss-2a86307`, measured on both. So `/api/status`
+is not a build identifier, and a tool that branched on it would be guessing.
+
+These tools do not branch on it. Where the builds disagree, the encoder refuses
+the input rather than picking a behaviour: `quoted()` will not send a backslash,
+because no escaping is correct on both. Everything else they depend on is
+asserted against the running engine by `tests/test_engine_limits.py`, which
+checks the encoder rather than the engine wherever the engine is the thing that
+varies — a test that pins one build's behaviour passes on one box and fails on
+another with nothing to say why.
 
 ```bash
 docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0

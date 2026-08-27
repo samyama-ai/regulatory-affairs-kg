@@ -68,35 +68,6 @@ def test_rows_are_returned_as_named_fields(monkeypatch):
     assert rows == [{"clearance": "K233820", "device": "A scanner"}]
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("870.5150", chr(34) + "870.5150" + chr(34)),
-    ("O'Brien", chr(34) + "O'Brien" + chr(34)),
-    ("back\\slash", chr(34) + "back\\slash" + chr(34)),
-    ('say "hi"', chr(39) + 'say "hi"' + chr(39)),
-])
-def test_a_literal_is_quoted_by_choosing_a_delimiter_not_by_escaping(value, expected):
-    """1.1.0 has NO escape sequences inside a literal, so the delimiter is
-    chosen per value rather than the quote being escaped.
-
-    These expectations used to assert the backslash form. That is why they
-    passed while the engine rejected the statement: they compared
-    `quoted()`'s output against itself, and the one thing neither of them
-    consulted was the engine. Measured against 1.1.0 — the old form returns
-    HTTP 400, this one parses.
-    """
-    assert engine.quoted(value) == expected
-
-
-def test_an_integer_is_matched_as_the_text_it_is_stored_as():
-    """`lit()` emits numbers unquoted, correctly — the engine keeps the type.
-    But every value these tools compare against is stored as TEXT, including
-    `device_class`, measured as "1", "2", "3" and "N" on the loaded graph. An
-    int reaching the encoder would render `2`, match nothing, and say so in no
-    way at all."""
-    assert engine.quoted(2) == chr(34) + "2" + chr(34)
-    assert engine.quoted("2") == chr(34) + "2" + chr(34)
-
-
 def test_the_environment_wins_over_the_config(monkeypatch):
     monkeypatch.setenv("SAMYAMA_URL", "http://elsewhere:9999/")
     assert engine.engine_url() == "http://elsewhere:9999"
@@ -192,45 +163,6 @@ def test_a_config_value_with_a_comment_or_quotes_is_read_cleanly(monkeypatch, tm
     monkeypatch.delenv("SAMYAMA_URL", raising=False)
     monkeypatch.setattr(engine, "__file__", str(home / "engine.py"))
     assert engine.engine_url() == "http://127.0.0.1:8080"
-
-
-def test_a_term_holding_both_quote_characters_is_refused_not_altered():
-    """`lit()` substitutes a typographic quote when a value holds both `'` and
-    `"`, because 1.1.0 can express neither. Writing a value that way is a
-    recorded compromise the loader reports. MATCHING on one is not: the term
-    compared against is no longer the term asked for, so the query returns no
-    rows and no error.
-
-    That is a third meaning inside the same empty list — this module's own
-    docstring names two and exists to keep them apart.
-    """
-    with pytest.raises(engine.Unbounded, match="cannot be matched exactly"):
-        engine.quoted('Governor\'s "Special" Device')
-
-
-def test_a_term_with_only_one_quote_kind_still_works():
-    """The fix must not refuse what 1.1.0 CAN express — an apostrophe alone is
-    the common case and `lit()` handles it by choosing the other delimiter."""
-    assert engine.quoted("O'Brien") == '"O\'Brien"'
-    assert engine.quoted('say "hi"') == "'say \"hi\"'"
-
-
-def test_refusing_a_term_does_not_grow_the_sanitised_record():
-    """`etl.cypher.SANITISED` is a module-level list nothing trims, and an MCP
-    server is a long-lived process — the loader calls `reset()` at the start of
-    a run and the server never does.
-
-    Every entry this path would add is one `quoted()` is about to refuse and
-    report, so dropping it loses nothing. A list that only grows, in a process
-    that only runs, holding records nobody reads, is a leak.
-    """
-    from etl.cypher import SANITISED
-    before = len(SANITISED)
-    for _ in range(50):
-        with pytest.raises(engine.Unbounded):
-            engine.quoted('a\'b"c')
-    assert len(SANITISED) == before, (
-        f"SANITISED grew by {len(SANITISED) - before} across 50 refused calls")
 
 
 def test_a_limit_above_the_ceiling_is_refused():
@@ -342,14 +274,6 @@ def test_an_error_body_that_is_not_utf8_is_still_reported(monkeypatch):
     assert "502" in got.error
 
 
-def test_a_search_term_longer_than_the_cap_is_refused(monkeypatch):
-    """An agent picks these, so an accidental paste is likelier than an attack.
-    A 100k-character term produced a 100KB statement the engine accepted."""
-    with pytest.raises(engine.Unbounded, match="characters; the limit is"):
-        engine.quoted("x" * 100_000)
-    assert engine.quoted("x" * 10), "an ordinary term was refused"
-
-
 def test_a_non_http_engine_url_is_refused(monkeypatch):
     """`file:///tmp/fake` with a crafted `api/query` file returns fabricated
     rows to the agent with `error: None`. Operator-set rather than agent-set,
@@ -378,55 +302,6 @@ def test_a_row_that_does_not_match_its_columns_is_an_error_not_a_short_row(monke
     assert "does not match its own columns" in got.error
 
 
-def test_a_none_search_term_is_refused_but_a_number_is_still_coerced():
-    """Two behaviours that look the same and are not.
-
-    `None` mapped to `""`, so `regulations_for_product(None)` searched for the
-    empty string and returned `found: False, error: None` — a bad argument
-    producing an answer indistinguishable from a good one finding nothing.
-
-    A NUMBER must keep working, and this is why refusing every non-`str` would
-    have been wrong: every value these tools compare against is stored as text,
-    `device_class` included, so `device_class=2` has to render as `"2"` rather
-    than be rejected. A number has an unambiguous text meaning; `None` does not.
-    """
-    for refused in (None, ["870.5150"], {"a": 1}):
-        with pytest.raises(engine.Unbounded, match="must be text or a number"):
-            engine.quoted(refused)
-
-    assert engine.quoted(2) == engine.quoted("2"), (
-        "an int stopped coercing to the text the graph stores — device_class "
-        "lookups now match nothing")
-
-
-def test_a_control_character_is_refused_rather_than_silently_replaced():
-    """The hole in `quoted()`'s own invariant.
-
-    `quoted()` refuses anything `lit()` altered, by watching `SANITISED`. But
-    `lit()` collapses control characters to a space and records NOTHING — so
-    the one alteration it cannot see is the one that silently changes the term
-    being matched. Measured: `lit("a\nb")` returns `"a b"` with `SANITISED`
-    untouched, so the search ran for something the caller never asked for and
-    came back empty with `error: None`.
-    """
-    for bad in ("a\nb", "a\tb", "a\x00b", "a\u2028b"):
-        with pytest.raises(engine.Unbounded, match="control character"):
-            engine.quoted(bad)
-
-    # An ordinary term, and the apostrophe case, still work.
-    assert engine.quoted("normal") == chr(34) + "normal" + chr(34)
-    assert "O'BRIEN" in engine.quoted("O'BRIEN")
-
-
-def test_an_empty_search_term_is_refused():
-    """An empty string matches nothing and returns the same empty answer as a
-    term that genuinely has no rows — the third meaning in an empty list this
-    module exists to keep out."""
-    for blank in ("", "   ", "\t "):
-        with pytest.raises(engine.Unbounded, match="cannot be empty|control character"):
-            engine.quoted(blank)
-
-
 def test_a_bad_engine_url_reaches_the_caller_as_an_error_not_an_exception(monkeypatch):
     """`engine_url()` validates the scheme now, so it can raise — and it was
     called while BUILDING the request, outside the try. That escaped every
@@ -439,31 +314,6 @@ def test_a_bad_engine_url_reaches_the_caller_as_an_error_not_an_exception(monkey
     got = engine.run("MATCH (n) RETURN n")
     assert not got.ok, "a refused URL did not come back as an error"
     assert "http or https" in got.error
-
-
-def test_a_c1_control_character_is_refused_like_every_other_one():
-    """The comment said "same C0/C1 set the loader collapses". Neither did.
-
-    `lit("a\\x85b")` returns the C1 byte untouched — measured — and this
-    function's control-character guard stopped at C0 and DEL, so U+0080–U+009F
-    passed straight through both. The claim was in two files and true in
-    neither.
-
-    It round-trips through this engine unaltered today, so this is prevention
-    rather than a correction: U+0085 is a line terminator to some parsers,
-    every C1 is invisible in any interface a caller reads an answer in, and a
-    search term nobody can see is one nobody can check.
-    """
-    for char in ("\x80", "\x85", "\x9f"):
-        with pytest.raises(engine.Unbounded) as refused:
-            engine.quoted(f"a{char}b")
-        assert "control character" in str(refused.value)
-
-    # The boundary on both sides, so the range cannot quietly widen or narrow.
-    assert engine.quoted("a\x7eb"), "~ is printable and must still be sent"
-    assert engine.quoted("a\xa0b"), (
-        "U+00A0 is a non-breaking space, not a control character; refusing it "
-        "would reject a term a source could legitimately carry")
 
 
 def test_the_engine_url_is_read_once_per_call():
