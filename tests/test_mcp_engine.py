@@ -397,3 +397,45 @@ def test_a_none_search_term_is_refused_but_a_number_is_still_coerced():
     assert engine.quoted(2) == engine.quoted("2"), (
         "an int stopped coercing to the text the graph stores — device_class "
         "lookups now match nothing")
+
+
+def test_a_control_character_is_refused_rather_than_silently_replaced():
+    """The hole in `quoted()`'s own invariant.
+
+    `quoted()` refuses anything `lit()` altered, by watching `SANITISED`. But
+    `lit()` collapses control characters to a space and records NOTHING — so
+    the one alteration it cannot see is the one that silently changes the term
+    being matched. Measured: `lit("a\nb")` returns `"a b"` with `SANITISED`
+    untouched, so the search ran for something the caller never asked for and
+    came back empty with `error: None`.
+    """
+    for bad in ("a\nb", "a\tb", "a\x00b", "a\u2028b"):
+        with pytest.raises(engine.Unbounded, match="control character"):
+            engine.quoted(bad)
+
+    # An ordinary term, and the apostrophe case, still work.
+    assert engine.quoted("normal") == chr(34) + "normal" + chr(34)
+    assert "O'BRIEN" in engine.quoted("O'BRIEN")
+
+
+def test_an_empty_search_term_is_refused():
+    """An empty string matches nothing and returns the same empty answer as a
+    term that genuinely has no rows — the third meaning in an empty list this
+    module exists to keep out."""
+    for blank in ("", "   ", "\t "):
+        with pytest.raises(engine.Unbounded, match="cannot be empty|control character"):
+            engine.quoted(blank)
+
+
+def test_a_bad_engine_url_reaches_the_caller_as_an_error_not_an_exception(monkeypatch):
+    """`engine_url()` validates the scheme now, so it can raise — and it was
+    called while BUILDING the request, outside the try. That escaped every
+    tool as an exception instead of arriving as `Result(error=...)`.
+
+    Exactly the pattern `quoted()` was moved inside a try for: a function that
+    gained the ability to refuse, still called where nothing catches it.
+    """
+    monkeypatch.setenv("SAMYAMA_URL", "file:///tmp/fake")
+    got = engine.run("MATCH (n) RETURN n")
+    assert not got.ok, "a refused URL did not come back as an error"
+    assert "http or https" in got.error

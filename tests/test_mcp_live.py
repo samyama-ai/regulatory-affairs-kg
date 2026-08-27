@@ -392,3 +392,49 @@ def test_the_product_code_join_reaches_the_same_rule_the_clearance_names(loaded_
         f"product-code traversal cannot reach, so clearances_under_regulation "
         f"now understates blast radius by that many. The docstring's measured "
         f"claim of 0 is stale.")
+
+
+def test_a_clearance_under_two_product_codes_fills_the_page_once(loaded_engine):
+    """The dedup, proved against a real engine rather than against the query.
+
+    `RETURN DISTINCT` is a silent no-op on 1.1.0, so a query can look
+    deduplicated and not be. This builds the case the loaded data does not
+    contain — one clearance reaching one rule through TWO product codes — and
+    asserts two things the previous Python-side dedup got wrong:
+
+      * the clearance appears once, not twice;
+      * a page of N still contains N distinct clearances. Capping first and
+        deduplicating second returned a short page with no signal.
+    """
+    for statement in (
+        "CREATE (p:ProductCode {product_code: 'DUP1', device_class: '2', "
+        "source: 'test'})",
+        "MATCH (p:ProductCode {product_code: 'DUP1'}), "
+        "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
+        # K999001 already classifies as DXY; this gives it a second code under
+        # the same rule, which is the shape that produced the duplicate.
+        "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DUP1'}) "
+        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
+        "CREATE (s:Submission {id: 'K999004', device_name: 'Another', "
+        "applicant: 'Acme', decision_date: '2024-04-05', "
+        "regulation_number: '870.5150', advisory_committee: 'Cardiovascular', "
+        "source: 'test'})",
+        "MATCH (s:Submission {id: 'K999004'}), (p:ProductCode {product_code: 'DXY'}) "
+        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
+    ):
+        assert engine.run(statement).ok
+
+    listed = queries.clearances_under_regulation("870.5150")
+    assert listed["error"] is None
+    ids = [row["clearance"] for row in listed["clearances"]]
+    assert ids.count("K999001") == 1, (
+        f"the clearance with two product codes was listed {ids.count('K999001')} "
+        f"times — the engine is not deduplicating")
+
+    # A page of one must hold ONE clearance. Under the old ordering the
+    # duplicate consumed the page and this came back empty.
+    page = queries.clearances_under_regulation("870.5150", limit=1)
+    assert page["error"] is None
+    assert page["count"] == 1, (
+        f"a page of 1 returned {page['count']} clearances — duplicates are "
+        f"eating the page because the cap runs before the deduplication")

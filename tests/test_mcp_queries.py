@@ -222,7 +222,21 @@ def test_a_bad_limit_is_an_error_not_a_traceback_or_a_negative_limit():
             got = tool(*args, bad)
             assert got["error"], f"{tool.__name__}({bad!r}) returned no error"
             assert "limit" in got["error"], got["error"]
-            assert got["count"] == 0, got
+
+            # Whichever count key the tool uses, on the path it refuses.
+            # `product_codes_by_class` reports `rows_returned` rather than
+            # `count` because its number is a page size and not a total — the
+            # names differ because the meanings do. Asserting one hardcoded
+            # key made a rename look like a regression, and asserting the
+            # error path returns SOMETHING zero-valued is the property that
+            # actually matters.
+            counts = [v for k, v in got.items()
+                      if k in ("count", "total", "rows_returned")]
+            assert counts, (
+                f"{tool.__name__} returns no count key at all on the error "
+                f"path, so a caller cannot tell an empty answer from a "
+                f"refused one: {sorted(got)}")
+            assert all(v == 0 for v in counts), got
 
 
 def test_a_reverse_lookup_of_a_non_string_is_an_error_not_an_attribute_error():
@@ -393,39 +407,42 @@ def test_provenance_survives_a_failed_second_query(monkeypatch):
     assert got["by_label"] == []
 
 
-def test_a_clearance_under_two_product_codes_is_listed_once(monkeypatch):
-    """The listing and the count must count the same thing.
+def test_the_listing_asks_the_engine_to_deduplicate_before_it_limits():
+    """The bug this replaced: dedup after the cap returns a short page.
 
-    A Submission reaches a Regulation once per product code it classifies as,
-    so a device carrying two codes under one rule produces two rows.
-    `count_clearances_under_regulation` uses `count(DISTINCT s)`; the listing
-    did not deduplicate, so the two disagreed with the list longer.
+    A Submission reaches a Regulation once per product code, so duplicates are
+    real. Removing them in Python ran AFTER the Cypher `LIMIT`, so a page of 25
+    came back with fewer than 25 distinct clearances and the caller could not
+    tell a short page from the end of the data.
 
-    The obvious fix — `RETURN DISTINCT` — is a **silent no-op on 1.1.0**:
-    measured, two identical rows go in and two come back. So it would have
-    looked like a fix and changed nothing, which is why the deduplication is in
-    Python and this test drives it through the engine boundary.
+    Asserted on the Cypher the builder SENDS, captured through a recording
+    fake — not by reading the function's source, which agrees with how the
+    query is spelled rather than with what it asks for.
     """
+    sent = []
+
     class R:
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self):
-            return json.dumps({
-                "columns": ["clearance", "device", "applicant",
-                            "decided", "product_code"],
-                # One clearance, two product codes under the same rule.
-                "records": [["K999001", "A device", "Acme", "2024-01-02", "DXY"],
-                            ["K999001", "A device", "Acme", "2024-01-02", "DXZ"],
-                            ["K999002", "Another", "Acme", "2024-01-03", "DXY"]],
-            }).encode()
-    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())
+            return json.dumps({"columns": ["clearance"], "records": []}).encode()
 
-    got = queries.clearances_under_regulation("870.5150")
-    assert got["error"] is None
-    assert got["count"] == 2, (
-        "a clearance reaching the rule through two product codes was listed "
-        "twice, so the listing disagrees with count(DISTINCT s)")
-    assert [row["clearance"] for row in got["clearances"]] == ["K999001", "K999002"]
+    def capture(request, *a, **k):
+        sent.append(json.loads(request.data)["query"])
+        return R()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(engine.urllib.request, "urlopen", capture)
+        queries.clearances_under_regulation("870.5150", limit=25)
+
+    cypher = sent[0]
+    grouped = cypher.index("min(p.product_code)")
+    limited = cypher.index("LIMIT")
+    assert grouped < limited, (
+        "the grouping that removes duplicates runs after LIMIT, so the page is "
+        "capped before duplicates are dropped and comes back short")
+    assert "RETURN DISTINCT" not in cypher, (
+        "RETURN DISTINCT is a silent no-op on this engine — measured — so a "
+        "query relying on it looks deduplicated and is not")
 
 
 def test_every_tool_turns_a_none_argument_into_an_error_not_an_empty_answer():
@@ -442,3 +459,35 @@ def test_every_tool_turns_a_none_argument_into_an_error_not_an_empty_answer():
         assert got.get("error"), (
             f"{name} returned no error for a None argument — an agent reads "
             f"the empty answer as 'no such device exists'")
+
+
+def test_provenance_reports_nothing_when_only_the_last_query_fails(monkeypatch):
+    """Counts alongside a non-null error read as "here is the answer, and also
+    something went wrong" — and a caller checking `error` last has already
+    used the figures.
+
+    The existing failure test fails EVERY query, so it returns at the first
+    guard and never reaches this path. This one lets the label counts succeed
+    and fails only `by_source`, which is the shape that produced a
+    half-filled answer.
+    """
+    def dispatch(request, *a, **k):
+        cypher = json.loads(request.data)["query"]
+        failing = "n.source IS NOT NULL" in cypher
+        payload = ({"error": "the source rollup failed"} if failing
+                   else {"columns": ["nodes"], "records": [[7]]})
+
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(payload).encode()
+        return R()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", dispatch)
+
+    got = queries.graph_provenance()
+    assert got["error"], "the failed rollup was not reported"
+    assert got["nodes"] is None, (
+        f"node counts were returned alongside an error ({got['nodes']}) — a "
+        f"caller that checks `error` last has already used them")
+    assert got["by_label"] == []
+    assert got["nodes_in_store"] is None

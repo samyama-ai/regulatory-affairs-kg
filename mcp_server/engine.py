@@ -102,11 +102,20 @@ class Result:
 
 
 def run(cypher: str) -> Result:
-    request = urllib.request.Request(
-        engine_url() + "/api/query",
-        data=json.dumps({"query": cypher}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
+    # `engine_url()` is INSIDE the try. It validates the scheme now, so it can
+    # raise `Unbounded` — and built outside, that escaped every tool as an
+    # exception rather than arriving as `Result(error=...)`. Exactly the
+    # pattern `quoted()` was moved inside a try for two rounds ago: a function
+    # that gained the ability to refuse, still called where nothing catches it.
+    try:
+        request = urllib.request.Request(
+            engine_url() + "/api/query",
+            data=json.dumps({"query": cypher}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+    except Unbounded as exc:
+        return Result(error=str(exc))
+
     try:
         # `with`: an unclosed response holds its socket until the garbage
         # collector gets to it, and an MCP server is long-lived.
@@ -292,6 +301,32 @@ def quoted(value) -> str:
     # ("1", "2", "3", "N", "U", "f" — measured), so `device_class=2` MUST
     # render as `"2"` rather than being rejected. A number has an unambiguous
     # text meaning; `None` and a list do not.
+    # Control characters are refused HERE, because `lit()` collapses them to a
+    # space and records nothing in `SANITISED`. That is a hole in this
+    # function's whole invariant — "refuse anything `lit()` altered" — since
+    # the one alteration it cannot see is the one that silently changes the
+    # term being matched. Measured: `lit("a\nb")` returns `"a b"` with
+    # `SANITISED` untouched, so `regulations_for_product("a\nb")` searched for
+    # something the caller never asked for and returned an empty answer with
+    # `error: None`.
+    #
+    # Refusing before `lit()` runs is what closes it. Same C0/C1 set the
+    # loader collapses, so the two agree about what is unrepresentable.
+    if isinstance(value, str):
+        bad = [ch for ch in value
+               if ch < " " or ch in ("\x7f", "\u2028", "\u2029")]
+        if bad:
+            raise Unbounded(
+                f"the search term contains {len(bad)} control character(s), "
+                f"which cannot be sent as part of a Cypher string on this "
+                f"engine. They would be silently replaced with spaces and the "
+                f"term matched would not be the term asked for.")
+
+    if isinstance(value, str) and not value.strip():
+        raise Unbounded(
+            "a search term cannot be empty. An empty string matches nothing "
+            "and returns the same empty answer as a term that genuinely has "
+            "no rows — the third meaning this module exists to keep out.")
     if value is None or isinstance(value, (list, dict, tuple, set)):
         raise Unbounded(
             f"a search term must be text or a number, got "

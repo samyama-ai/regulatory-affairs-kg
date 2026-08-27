@@ -90,30 +90,35 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
         f"MATCH (r:Regulation)<-[:GOVERNED_BY]-(p:ProductCode)"
         f"<-[:CLASSIFIED_AS]-(s:Submission) "
         f"WHERE r.cfr_section = {where} "
+        # Deduplicated in the ENGINE, before the LIMIT.
+        #
+        # A Submission reaches a Regulation once per product code it
+        # classifies as, so a device carrying two codes under one rule
+        # produced two rows. Removing those in Python after `LIMIT` capped
+        # the rows FIRST and dropped duplicates SECOND — so a page of 25
+        # came back with fewer than 25 distinct clearances and nothing said
+        # why. The caller cannot tell a short page from the end of the data.
+        #
+        # `RETURN DISTINCT` is a silent no-op on 1.1.0 (measured: two
+        # identical rows go in, two come back), which is what sent the first
+        # attempt into Python. `WITH DISTINCT` is not — measured on the same
+        # engine, it collapses them. `min()` groups the same way and keeps a
+        # product code in the row.
+        #
+        # `min(p.product_code)` rather than an arbitrary one: with several
+        # codes the answer is the lowest, which is stable across calls.
+        # Measured on the loaded graph, every Submission carries exactly one
+        # (max fan-out 1, zero with more), so this is a guard rather than a
+        # correction today.
+        f"WITH s, min(p.product_code) AS product_code "
         f"RETURN s.id AS clearance, s.device_name AS device, "
-        f"s.applicant AS applicant, s.decision_date AS decided, "
-        f"p.product_code AS product_code "
-        # Two keys, because `decision_date` is not unique: many clearances share
-        # a date, so a single-key ORDER BY leaves LIMIT free to return a
-        # different subset each call. An agent comparing two calls sees a change
-        # that did not happen.
+        f"s.applicant AS applicant, s.decision_date AS decided, product_code "
+        # Two keys, because `decision_date` is not unique: many clearances
+        # share a date, so a single-key ORDER BY leaves LIMIT free to return a
+        # different subset each call.
         f"ORDER BY s.decision_date DESC, s.id LIMIT {rows_wanted}"
     )
-    # Deduplicated HERE, not with `RETURN DISTINCT`. Measured on 1.1.0:
-    # `RETURN DISTINCT` is a silent no-op — two identical rows go in, two come
-    # back. So the obvious fix would have looked like a fix and changed
-    # nothing, while `count_clearances_under_regulation` genuinely uses
-    # `count(DISTINCT s)`. The two would then disagree, with the listing longer.
-    #
-    # A Submission reaches a Regulation once per product code it classifies as,
-    # so the duplicate is real whenever a device carries two codes under one
-    # rule.
-    seen, clearances = set(), []
-    for row in result.rows:
-        if row.get("clearance") in seen:
-            continue
-        seen.add(row.get("clearance"))
-        clearances.append(row)
+    clearances = result.rows
 
     return {"cfr_section": cfr_section, "clearances": clearances,
             "count": len(clearances), "error": result.error}
@@ -295,7 +300,11 @@ def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
         rows_wanted = bounded(limit)
         where = quoted(device_class)
     except Unbounded as exc:
-        return {"device_class": device_class, "product_codes": [], "count": 0,
+        # `rows_returned` on BOTH paths. The rename reached the success path
+        # and not this one, so a caller reading one key got `None` on the
+        # other — and the error path is where a caller is least able to guess.
+        return {"device_class": device_class, "product_codes": [],
+                "rows_returned": 0, "unregulated_in_page": 0,
                 "unregulated_in_page": 0, "error": str(exc)}
 
     result = run(
@@ -343,8 +352,15 @@ def graph_provenance() -> dict:
     with a non-zero `nodes_in_store`, which is the honest shape of "you have
     pointed me at something else".
 
+    `nodes` is the SUM of the per-label counts, so a node carrying two of
+    these labels counts twice. This schema declares none, and the engine
+    cannot answer `WHERE n:A OR n:B` (parse error, measured), so the sum is
+    the closest available figure rather than the exact one — said here rather
+    than left for a reader to discover from `by_label` not adding up.
+
     Returns `by_label`, `nodes` (this dataset), `nodes_in_store` (everything
-    the engine holds), `by_source`, and `error`.
+    the engine holds), `by_source`, and `error`. On any failure every figure
+    is `None` rather than partly filled.
     """
     totals = run("MATCH (n) RETURN count(n) AS nodes")
     # Early: the second query against an engine already known to be down is a
@@ -366,7 +382,15 @@ def graph_provenance() -> dict:
     sourced = run("MATCH (n) WHERE n.source IS NOT NULL "
                   "RETURN n.source AS source, count(n) AS nodes "
                   "ORDER BY nodes DESC")
+    if not sourced.ok:
+        # Counts alongside a non-null error read as "here is the answer, and
+        # also something went wrong" — and a caller that checks `error` last
+        # has already used the figures. If any part failed, nothing is
+        # reported.
+        return {"nodes": None, "nodes_in_store": None, "by_label": [],
+                "by_source": [], "error": sourced.error}
+
     return {"nodes": ours,
             "nodes_in_store": totals.rows[0].get("nodes") if totals.rows else None,
             "by_label": by_label,
-            "by_source": sourced.rows, "error": sourced.error}
+            "by_source": sourced.rows, "error": None}
