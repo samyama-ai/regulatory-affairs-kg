@@ -79,8 +79,15 @@ not, every point lookup on a MERGE key scans the whole label.
 This page used to answer that in prose — "it does not" — and the answer **had
 stopped being true**. On the engine these containers run, a constraint produces
 an index entry immediately, and a point lookup on a keyed label is fast on the
-constraint alone, with a subsequent `CREATE INDEX` adding nothing. The figures
-are on the generated page, not here, for the reason below.
+constraint alone, with a subsequent `CREATE INDEX` adding nothing.
+
+Whatever the run establishes is on the generated page, not here — and on an
+instance whose keys are already indexed, what that page reports is **dashes and
+the reason for them**, not a speedup. There is no unindexed figure left to
+measure once the constraints exist, so the comparison refuses rather than
+timing one indexed lookup against another and calling the difference a speedup.
+The unindexed figures need a fresh instance, and the page says so where the
+dashes are.
 
 Two things made that easy to miss. The claim was written once and never
 re-checked, and the version it was scoped to was read off the **image tag** —
@@ -97,7 +104,14 @@ second file drifts the moment the first is regenerated, and this table had
 already drifted — it quoted a run whose scan times were a third lower than the
 current ones. One source for a figure, and it is the one a program writes.
 
-Raised as **#21**; the demo, the MCP tools and the loader are all paying it.
+**#21 is the issue this retracts.** It was raised on the prose claim and it
+reports a cost that nothing is paying: on a graph loaded through `etl/`, those
+keys are indexed by their own constraints. Its table is a real measurement of a
+`CREATE INDEX` against a label that had none — which is not the same question
+as whether the constraint indexes the key. It should be closed against this run
+rather than left open, and it is named here so it is not worked from in the
+meantime. Its figures are not repeated here, for the reason in the paragraph
+above.
 
 ## It refuses to run against the wrong graph
 

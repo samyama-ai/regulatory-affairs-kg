@@ -1,6 +1,6 @@
 # Regulatory Affairs KG — query results
 
-> Measured 2026-08-27T06:55:31+00:00 · Samyama-Graph **1.7.0** (image `public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0`) · local Docker
+> Measured 2026-08-27T08:29:07+00:00 · Samyama-Graph **1.7.0** (image `public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0`) · local Docker
 > 28,496 nodes, 25,310 edges
 
 **Timings are client round-trip, not engine execution time.** The clock
@@ -48,7 +48,7 @@ The question this graph exists for. Two hops, THROUGH THE PRODUCT CODE — this 
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN count(s) AS clearances
 ```
 
-**6.2 ms** median of 5 (min 5.3, max 7.5)
+**8.2 ms** median of 5 (min 7.2, max 9.5)
 
 | clearances |
 |---|
@@ -65,7 +65,7 @@ The same traversal, returning rows rather than a count.
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN s.id AS clearance, s.applicant AS applicant, s.decision_date AS decided ORDER BY s.decision_date DESC LIMIT 5
 ```
 
-**7.3 ms** median of 5 (min 4.6, max 9.0)
+**9.5 ms** median of 5 (min 9.1, max 11.2)
 
 | clearance | applicant | decided |
 |---|---|---|
@@ -86,7 +86,7 @@ An aggregation across the whole graph. Answers which rules carry the most cleara
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) RETURN r.cfr_section AS cfr_section, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**21.4 ms** median of 5 (min 21.2, max 22.1)
+**31.9 ms** median of 5 (min 27.4, max 53.4)
 
 | cfr_section | clearances |
 |---|---|
@@ -112,7 +112,7 @@ One hop from the join hub. `product_code` is on every openFDA endpoint; device *
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.product_code = 'DXY' RETURN p.definition AS device_category, p.device_class AS class, r.cfr_section AS cfr_section
 ```
 
-**1.3 ms** median of 5 (min 1.2, max 1.3)
+**31.0 ms** median of 5 (min 28.3, max 39.9)
 
 | device_category | class | cfr_section |
 |---|---|---|
@@ -129,7 +129,7 @@ The reverse of the above, and the first half of a change-impact answer.
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE r.cfr_section = '870.5150' RETURN p.product_code AS product_code, p.definition AS category LIMIT 10
 ```
 
-**1.2 ms** median of 5 (min 1.2, max 1.4)
+**2.7 ms** median of 5 (min 2.3, max 2.8)
 
 | product_code | category |
 |---|---|
@@ -151,7 +151,7 @@ A point lookup through two hops — the query an inspector runs.
 MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE s.id = 'K233820' RETURN s.device_name AS device, p.product_code AS product_code, r.cfr_section AS cfr_section
 ```
 
-**1.2 ms** median of 5 (min 1.2, max 1.3)
+**110.2 ms** median of 5 (min 90.4, max 125.3)
 
 | device | product_code | cfr_section |
 |---|---|---|
@@ -168,7 +168,7 @@ A grouping over 19,127 submissions. **The distribution is an artifact of the sli
 MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL RETURN s.advisory_committee AS committee, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**22.0 ms** median of 5 (min 16.9, max 25.1)
+**30.9 ms** median of 5 (min 20.1, max 33.4)
 
 | committee | clearances |
 |---|---|
@@ -186,7 +186,7 @@ A filtered scan with a join — the population a reviewer starts from. It is NOT
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.device_class = '3' RETURN count(DISTINCT p) AS class_three_with_a_regulation
 ```
 
-**9.7 ms** median of 5 (min 8.9, max 10.9)
+**12.8 ms** median of 5 (min 12.0, max 14.1)
 
 | class_three_with_a_regulation |
 |---|
@@ -203,7 +203,7 @@ The question a reviewer asks before trusting any answer above. Every node carrie
 MATCH (n) WHERE n.source IS NOT NULL RETURN n.source AS source, count(n) AS nodes ORDER BY nodes DESC
 ```
 
-**26.4 ms** median of 5 (min 22.1, max 47.2)
+**54.5 ms** median of 5 (min 43.5, max 63.0)
 
 | source | nodes |
 |---|---|
@@ -229,23 +229,36 @@ recorded here because the correction matters more than the original claim:
 a page whose argument is that its numbers were measured should not carry a
 conclusion that stopped being true.
 
-The practical consequence is that the MERGE keys are **already indexed** by
-the schema on a freshly-loaded graph, so the before/after comparison below
-has nothing unindexed left to measure and correctly refuses.
+Whether the MERGE keys on **this** instance are indexed is a separate
+question, and it is answered by the comparison below rather than predicted
+here: a graph loaded through `etl/` arrives with the schema's constraints
+already applied, and one restored from a snapshot does not.
 
 | Key | Nodes | Scan | Indexed | Speedup |
 |---|---:|---:|---:|---:|
-| `Submission.id` | 19,127 | — | — | _already indexed — unindexed figure not measurable here_ |
-| `ProductCode.product_code` | 7,085 | — | — | _already indexed — unindexed figure not measurable here_ |
-| `Regulation.cfr_section` | 2,284 | — | — | _already indexed — unindexed figure not measurable here_ |
+| `Submission.id` | 19,127 | 207.3 ms | 1.4 ms | **149×** |
+| `ProductCode.product_code` | 7,085 | 55.9 ms | 1.3 ms | **43×** |
+| `Regulation.cfr_section` | 2,284 | 20.6 ms | 1.9 ms | **11×** |
 
-**These timings are not all unindexed.** `ConstraintIndexProbe.probe_id`, `ProductCode.product_code`, `Regulation.cfr_section`, `Submission.id` carried an index before this run started. Any query above that looks one of those up is an indexed figure, and the index comparison below refuses to report a speedup it cannot measure. For unindexed timings, run against a fresh instance.
+The speedup tracks label size almost exactly, which is what a full scan
+looks like. These keys carried **no constraint** on this instance, so what
+is measured here is an unindexed lookup against an indexed one. That is a
+different question from what a constraint does, which the section above
+answers on a probe label of its own.
+
+Every timing in the queries above is the **unindexed** figure — nothing
+on this instance was indexed when the run started. Any indexes this run
+created are created at the end, so nothing above benefits from them.
+
+That is a property of the instance rather than of the schema: a graph
+loaded through `etl/` carries the schema's constraints, and the section
+above measures whether those index the key.
 
 ---
 
 ## What the timings mean
 
-The slowest query here is **provenance** at 26.4 ms. Every query is a median of 5 runs,
+The slowest query here is **clearance to rule** at 110.2 ms. Every query is a median of 5 runs,
 because a single reading on a warm cache is not a measurement.
 
 These are **not** a comparison against another database. Nothing here has

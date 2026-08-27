@@ -137,6 +137,93 @@ def rendered(why: str, figures: dict, question: str) -> str:
             f"{{870.5150}}.") from None
 
 
+def constraint_section(constraint) -> list[str]:
+    """The constraint-index section, as lines.
+
+    Extracted from `report()` so each of its four arms can be rendered on
+    its own. Inline, the only way to reach the `established_here is False`
+    arm was to run a whole report, and that arm was added because the arm
+    next to it would otherwise print the OPPOSITE of the measured answer —
+    exactly the kind of branch that must be reachable from a test.
+    """
+    out = [
+        "---",
+        "",
+        "## Does a uniqueness constraint create an index?",
+        "",
+        "**Measured on this run, not remembered.** `schema/regulatory_affairs_kg.cypher`",
+        "declares `ASSERT s.id IS UNIQUE` for each MERGE key. Whether that also indexes",
+        "the key decides whether every point lookup scans the label — and it is the",
+        "answer this page was originally built around, so it is re-derived each run",
+        "rather than asserted.",
+        "",
+    ]
+    if constraint is None:
+        out += [
+            "_Not measured on this run._ Answering this declares a constraint on a "
+            "probe label, which writes to the graph — and `--print` is a dry run. "
+            "Pass `--with-index-effect` to measure it, against an instance you are "
+            "willing to change.",
+            "",
+        ]
+    elif not constraint["established_here"]:
+        # BEFORE the truth branches, because `indexed_by_constraint` is None
+        # here and None is falsy — without this the page would fall through to
+        # "on this engine it does not", which is a claim the run could not
+        # make and the opposite of the measured answer.
+        correlation = constraint["correlation"]
+        out += [
+            "_Not established on this run._ The probe leaves its constraint behind "
+            "— this engine cannot `DROP` one — so on an instance it has run against "
+            "before, the index on the probe label is its own from last time. It "
+            "cannot tell that from an index the constraint just built, so it "
+            "declines rather than reporting a finding it did not establish. Run "
+            "against a fresh instance for the causal answer.",
+            "",
+            f"What can be read without writing: the engine holds "
+            f"**{correlation['constraints']}** uniqueness constraint(s), and "
+            f"**{correlation['also_indexed']}** of those keys also carry an index. "
+            f"That is consistent with a constraint building one and is not "
+            f"evidence that it did — an index can be there for another reason.",
+            "",
+        ]
+    elif constraint["indexed_by_constraint"]:
+        out += [
+            f"**On this engine it does.** A constraint declared on a probe label produced "
+            f"a `{constraint['entry'].get('type', 'index')}` entry in `SHOW INDEXES` "
+            f"immediately, with no `CREATE INDEX`.",
+            "",
+            "This page previously stated the opposite as its headline finding, and that",
+            "statement was written against an earlier engine and never re-checked. It is",
+            "recorded here because the correction matters more than the original claim:",
+            "a page whose argument is that its numbers were measured should not carry a",
+            "conclusion that stopped being true.",
+            "",
+            # PREDICTED, and it was wrong. This used to read "the MERGE keys
+            # are already indexed by the schema, so the comparison below has
+            # nothing left to measure and correctly refuses" — asserted
+            # whenever the probe said yes, without asking what the comparison
+            # actually found. On a graph restored from a snapshot the schema
+            # was never applied, so the keys start unindexed, the comparison
+            # runs, and that sentence printed directly above a table of real
+            # figures denying they exist.
+            "Whether the MERGE keys on **this** instance are indexed is a separate",
+            "question, and it is answered by the comparison below rather than predicted",
+            "here: a graph loaded through `etl/` arrives with the schema's constraints",
+            "already applied, and one restored from a snapshot does not.",
+            "",
+        ]
+    else:
+        out += [
+            "**On this engine it does not.** A constraint declared on a probe label",
+            "produced no `SHOW INDEXES` entry, so the key is declared and not indexed,",
+            "and a point lookup on it scans the whole label. The comparison below is the",
+            "size of that cost.",
+            "",
+        ]
+    return out
+
+
 def report(url: str, with_index_effect: bool = True) -> str:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stats = shape(url)
@@ -241,51 +328,7 @@ def report(url: str, with_index_effect: bool = True) -> str:
             "",
         ]
 
-    lines += [
-        "---",
-        "",
-        "## Does a uniqueness constraint create an index?",
-        "",
-        "**Measured on this run, not remembered.** `schema/regulatory_affairs_kg.cypher`",
-        "declares `ASSERT s.id IS UNIQUE` for each MERGE key. Whether that also indexes",
-        "the key decides whether every point lookup scans the label — and it is the",
-        "answer this page was originally built around, so it is re-derived each run",
-        "rather than asserted.",
-        "",
-    ]
-    if constraint is None:
-        lines += [
-            "_Not measured on this run._ Answering this declares a constraint on a "
-            "probe label, which writes to the graph — and `--print` is a dry run. "
-            "Pass `--with-index-effect` to measure it, against an instance you are "
-            "willing to change.",
-            "",
-        ]
-    elif constraint["indexed_by_constraint"]:
-        lines += [
-            f"**On this engine it does.** A constraint declared on a probe label produced "
-            f"a `{constraint['entry'].get('type', 'index')}` entry in `SHOW INDEXES` "
-            f"immediately, with no `CREATE INDEX`.",
-            "",
-            "This page previously stated the opposite as its headline finding, and that",
-            "statement was written against an earlier engine and never re-checked. It is",
-            "recorded here because the correction matters more than the original claim:",
-            "a page whose argument is that its numbers were measured should not carry a",
-            "conclusion that stopped being true.",
-            "",
-            "The practical consequence is that the MERGE keys are **already indexed** by",
-            "the schema on a freshly-loaded graph, so the before/after comparison below",
-            "has nothing unindexed left to measure and correctly refuses.",
-            "",
-        ]
-    else:
-        lines += [
-            "**On this engine it does not.** A constraint declared on a probe label",
-            "produced no `SHOW INDEXES` entry, so the key is declared and not indexed,",
-            "and a point lookup on it scans the whole label. The comparison below is the",
-            "size of that cost.",
-            "",
-        ]
+    lines += constraint_section(constraint)
     # Bound before the branch: it is only assigned where the comparison runs,
     # and the prose gate below reads it on every path.
     measured_keys: list[dict] = []
@@ -318,10 +361,16 @@ def report(url: str, with_index_effect: bool = True) -> str:
     # exactly" above a table of dashes.
     if measured_keys:
         lines += [
+            # The retracted finding, GENERATED ONTO THE PAGE. "It does not
+            # index it either" is the claim this whole section exists to
+            # correct, and it printed two paragraphs below the headline saying
+            # the opposite — so the page contradicted itself in the same
+            # breath, in text a program wrote.
             "The speedup tracks label size almost exactly, which is what a full scan",
-            f"looks like. The schema already records that a constraint in {version} declares",
-            "the key rather than guarding an insert; it does not index it either, and",
-            "that had not been measured until now.",
+            "looks like. These keys carried **no constraint** on this instance, so what",
+            "is measured here is an unindexed lookup against an indexed one. That is a",
+            "different question from what a constraint does, which the section above",
+            "answers on a probe label of its own.",
             "",
         ]
     # Gated on what was ALREADY indexed when this run started, read before the
@@ -336,9 +385,20 @@ def report(url: str, with_index_effect: bool = True) -> str:
     # one. `--print` never runs the comparison at all and still printed it.
     if not indexed_before:
         lines += [
-            "Every timing in the queries above is the **unindexed** figure, because that",
-            "is what the shipped schema produces today. The indexes, where this run",
-            "created any, are created at the end, so nothing above benefits from them.",
+            # The REASON was stale, not the gate. This said the timings were
+            # unindexed "because that is what the shipped schema produces
+            # today" — written while the page still claimed a constraint does
+            # not index the key. Once that was corrected the sentence became
+            # its own contradiction: a schema whose constraints DO index would
+            # produce indexed lookups. The gate is right; what was unindexed
+            # is a property of the instance this ran against.
+            "Every timing in the queries above is the **unindexed** figure — nothing",
+            "on this instance was indexed when the run started. Any indexes this run",
+            "created are created at the end, so nothing above benefits from them.",
+            "",
+            "That is a property of the instance rather than of the schema: a graph",
+            "loaded through `etl/` carries the schema's constraints, and the section",
+            "above measures whether those index the key.",
             "",
         ]
     else:

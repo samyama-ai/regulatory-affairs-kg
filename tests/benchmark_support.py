@@ -78,3 +78,30 @@ def counts(total, submissions=0, product_codes=0, regulations=0, edges=0,
         "[r:GOVERNED_BY]": {"columns": ["c"],
                             "records": [[governed_by if governed_by is not None else each]]},
     }
+
+
+def fake_constraint(**overrides) -> dict:
+    """One `constraint_indexes()` result, built in ONE place.
+
+    Five render tests wrote this dict out by hand. Adding `established_here`
+    to the probe left all five passing a shape the run never produces, and the
+    renderer read a key none of them supplied — a `KeyError` reachable only in
+    production, in the branch that decides which of two opposite headline
+    findings the page prints.
+
+    `tests/test_benchmark_probes.py` asserts these keys against what the real
+    probe returns, so this cannot drift away from it silently.
+    """
+    base = {"label": "P",
+            "established_here": True,
+            "indexed_by_constraint": False,
+            "entry": None,
+            "correlation": {"constraints": 0, "also_indexed": 0},
+            "note": None}
+    unknown = set(overrides) - set(base)
+    if unknown:
+        raise AssertionError(
+            f"{sorted(unknown)} is not part of a constraint result; a test "
+            f"setting a key the probe does not return is testing a shape "
+            f"nothing produces")
+    return {**base, **overrides}

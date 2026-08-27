@@ -286,6 +286,24 @@ def existing_indexes(url: str) -> set[tuple[str, str]]:
 PROBE_LABEL = "ConstraintIndexProbe"
 
 
+def existing_constraints(url: str) -> set[tuple[str, str]]:
+    """`(label, property)` for every uniqueness constraint the engine holds.
+
+    Same shape and same column check as `existing_indexes`: if `SHOW
+    CONSTRAINTS` renames its columns, every row reads as `(None, None)` and a
+    check built on the set silently stops checking.
+    """
+    payload, _ = run("SHOW CONSTRAINTS", url)
+    columns = payload.get("columns") or []
+    missing = [name for name in ("label", "property") if name not in columns]
+    if missing:
+        raise SystemExit(
+            f"SHOW CONSTRAINTS no longer returns {missing} — it returns "
+            f"{columns}. Everything below reads those columns, and without "
+            f"them it would report a constrained key as unconstrained.")
+    return {(row.get("label"), row.get("property")) for row in rows_of(payload)}
+
+
 def constraint_indexes(url: str) -> dict:
     """Does a uniqueness constraint create an index? MEASURED, each run.
 
@@ -295,17 +313,65 @@ def constraint_indexes(url: str) -> dict:
     engine these containers run**.
 
     Measured here rather than remembered, because it is the page's headline and
-    the evidence edtech-kg#21 would be worked from. A probe label is created,
-    given a constraint, and `SHOW INDEXES` is asked whether an index appeared.
-    The probe leaves a constraint behind — 1.1.0 cannot DROP one — so the label
-    is namespaced and carries no data.
+    the evidence this repo's #21 would be worked from.
+
+    **Reporting only what THIS run established.** The first version created the
+    constraint and then asked `SHOW INDEXES` whether an index existed on the
+    probe label — without looking first. The probe leaves its constraint behind
+    (this engine cannot DROP one), so on any instance it had already run
+    against, the index it found was its own from a previous run. It reported
+    `True` having established nothing, and a re-run on a re-used container is
+    the normal case rather than the odd one.
+
+    So the state is read first, and the two situations are told apart instead
+    of being collapsed into one boolean:
+
+      * The probe label is unconstrained — a causal measurement is available.
+        Snapshot, create the constraint, and report the index that APPEARED.
+        `established_here` is True and the answer is this run's.
+      * The probe label is already constrained — this instance has been probed
+        before and the causal measurement is gone with it. Nothing is created,
+        and the read-only correlation is reported instead: how many of the
+        constraints the engine holds have an index on the same key.
+        `established_here` is False, and a reader can see that.
+
+    The correlation is not the same claim as the measurement and is not
+    presented as one. An index can exist on a constrained key for another
+    reason, so it is evidence consistent with the constraint building one, not
+    proof that it did. Only `established_here` carries proof.
     """
+    constrained = existing_constraints(url)
+    indexed = existing_indexes(url)
+    key = (PROBE_LABEL, "probe_id")
+
+    correlation = {
+        "constraints": len(constrained),
+        "also_indexed": len(constrained & indexed),
+    }
+
+    if key in constrained:
+        return {"label": PROBE_LABEL,
+                "established_here": False,
+                "indexed_by_constraint": None,
+                "entry": None,
+                "correlation": correlation,
+                "note": "this instance has been probed before and the probe's "
+                        "constraint cannot be dropped, so the causal "
+                        "measurement is not available here — use a fresh "
+                        "instance. The correlation below is read-only."}
+
     run(f"CREATE CONSTRAINT ON (n:{PROBE_LABEL}) ASSERT n.probe_id IS UNIQUE", url)
+    appeared = existing_indexes(url) - indexed
     payload, _ = run("SHOW INDEXES", url)
     listed = [r for r in rows_of(payload) if r.get("label") == PROBE_LABEL]
     return {"label": PROBE_LABEL,
-            "indexed_by_constraint": bool(listed),
-            "entry": listed[0] if listed else None}
+            "established_here": True,
+            # The index that APPEARED, not the one that is there. Those are the
+            # same thing exactly once per instance, and this is that once.
+            "indexed_by_constraint": key in appeared,
+            "entry": listed[0] if listed else None,
+            "correlation": correlation,
+            "note": None}
 
 
 def index_effect(url: str, sizes: dict) -> list[dict]:
