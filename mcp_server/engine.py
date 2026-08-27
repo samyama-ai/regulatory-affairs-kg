@@ -108,8 +108,14 @@ def run(cypher: str) -> Result:
     # pattern `quoted()` was moved inside a try for two rounds ago: a function
     # that gained the ability to refuse, still called where nothing catches it.
     try:
+        # Read ONCE and reused below. `engine_url()` was called again inside
+        # the `URLError` handler, which is a second network-config read in the
+        # one path that must not fail — and it can itself raise `Unbounded`,
+        # which nothing catches there, so a malformed config turned "no engine"
+        # into a traceback out of the error reporter.
+        url = engine_url()
         request = urllib.request.Request(
-            engine_url() + "/api/query",
+            url + "/api/query",
             data=json.dumps({"query": cypher}).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -135,7 +141,7 @@ def run(cypher: str) -> Result:
             detail = "<the error body could not be read>"
         return Result(error=f"engine returned {exc.code}: {detail}")
     except urllib.error.URLError as exc:
-        return Result(error=f"no engine at {engine_url()}: {exc.reason}")
+        return Result(error=f"no engine at {url}: {exc.reason}")
     except (TimeoutError, OSError) as exc:
         return Result(error=f"engine unreachable: {exc}")
 
@@ -205,8 +211,9 @@ def bounded(limit) -> int:
         raise Unbounded(f"limit must be at least 1, got {value}")
     if value > CEILING:
         raise Unbounded(
-            f"limit must be at most {CEILING:,}, got {value:,}. The largest "
-            f"limit larger than the graph asks for rows that cannot exist.")
+            f"limit must be at most {CEILING:,}, got {value:,}. That is larger "
+            f"than any label in this graph, so it asks for rows that cannot "
+            f"exist.")
     return value
 
 
@@ -320,11 +327,22 @@ def quoted(value) -> str:
     # something the caller never asked for and returned an empty answer with
     # `error: None`.
     #
-    # Refusing before `lit()` runs is what closes it. Same C0/C1 set the
-    # loader collapses, so the two agree about what is unrepresentable.
+    # Refusing before `lit()` runs is what closes it.
+    #
+    # C1 (U+0080–U+009F) is refused HERE and collapsed NOWHERE. Both this
+    # comment and `etl/cypher.py`'s claimed the loader collapses "the C0/C1
+    # ranges"; measured, neither does — `lit("a\x85b")` returns the C1 byte
+    # untouched. It round-trips through this engine unaltered (measured
+    # 2026-08-27), so this is prevention rather than correction: U+0085 is a
+    # line terminator to some parsers, every C1 is invisible in any UI a
+    # caller reads the answer in, and a term nobody can see is a term nobody
+    # can check. `etl/cypher.py` is left as it is — changing what a 54,000
+    # statement load writes is not this module's call — so the two encoders
+    # deliberately differ here, and both now say so.
     if isinstance(value, str):
         bad = [ch for ch in value
-               if ch < " " or ch in ("\x7f", "\u2028", "\u2029")]
+               if ch < " " or "\x7f" <= ch <= "\x9f"
+               or ch in ("\u2028", "\u2029")]
         if bad:
             raise Unbounded(
                 f"the search term contains {len(bad)} control character(s), "
@@ -337,6 +355,29 @@ def quoted(value) -> str:
             "a search term cannot be empty. An empty string matches nothing "
             "and returns the same empty answer as a term that genuinely has "
             "no rows — the third meaning this module exists to keep out.")
+    # `True` is not a search term, and `str(True)` is `"True"`. Refused
+    # BEFORE the number branch, because `isinstance(True, int)` is true — the
+    # same reason `bounded()` checks it first. Every value these tools compare
+    # against is text like "1", "2", "N"; `"True"` matches none of them and
+    # returns the empty answer this module exists to keep out.
+    if isinstance(value, bool):
+        raise Unbounded(
+            f"a search term must be text or a number, got {value!r}. It would "
+            f"be sent as the word \"{value}\", which matches nothing and "
+            f"returns the same empty answer as a term that has no rows.")
+    # `2.0` rendered `"2.0"`, and `device_class` is stored as `"2"` — so a
+    # limit-free, error-free, silently empty answer for an argument that was
+    # right. JSON has no integer type distinct from float, so a caller sending
+    # 2 can arrive here as 2.0 through no fault of its own; an integral float
+    # is narrowed rather than refused. A fractional one is refused, because
+    # there is no text it could have meant.
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise Unbounded(
+                f"a search term must be text or a whole number, got {value!r}. "
+                f"Every value these tools compare against is stored as text, "
+                f"and no stored value has a fractional part.")
+        value = int(value)
     if value is None or isinstance(value, (list, dict, tuple, set)):
         raise Unbounded(
             f"a search term must be text or a number, got "

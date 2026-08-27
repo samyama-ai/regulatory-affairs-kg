@@ -439,3 +439,58 @@ def test_a_bad_engine_url_reaches_the_caller_as_an_error_not_an_exception(monkey
     got = engine.run("MATCH (n) RETURN n")
     assert not got.ok, "a refused URL did not come back as an error"
     assert "http or https" in got.error
+
+
+def test_a_c1_control_character_is_refused_like_every_other_one():
+    """The comment said "same C0/C1 set the loader collapses". Neither did.
+
+    `lit("a\\x85b")` returns the C1 byte untouched — measured — and this
+    function's control-character guard stopped at C0 and DEL, so U+0080–U+009F
+    passed straight through both. The claim was in two files and true in
+    neither.
+
+    It round-trips through this engine unaltered today, so this is prevention
+    rather than a correction: U+0085 is a line terminator to some parsers,
+    every C1 is invisible in any interface a caller reads an answer in, and a
+    search term nobody can see is one nobody can check.
+    """
+    for char in ("\x80", "\x85", "\x9f"):
+        with pytest.raises(engine.Unbounded) as refused:
+            engine.quoted(f"a{char}b")
+        assert "control character" in str(refused.value)
+
+    # The boundary on both sides, so the range cannot quietly widen or narrow.
+    assert engine.quoted("a\x7eb"), "~ is printable and must still be sent"
+    assert engine.quoted("a\xa0b"), (
+        "U+00A0 is a non-breaking space, not a control character; refusing it "
+        "would reject a term a source could legitimately carry")
+
+
+def test_the_engine_url_is_read_once_per_call():
+    """It was read again inside the `URLError` handler.
+
+    That is a second network-config read in the one path that must not fail —
+    and `engine_url()` validates the scheme, so it can raise `Unbounded`, which
+    nothing catches there. A malformed config turned "no engine" into a
+    traceback out of the error reporter, in the module whose whole argument is
+    that a failure arrives as a `Result`.
+    """
+    reads = []
+    real = engine.engine_url
+
+    def counted():
+        reads.append(1)
+        return real()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(engine, "engine_url", counted)
+        mp.setattr(engine.urllib.request, "urlopen",
+                   lambda *a, **k: (_ for _ in ()).throw(
+                       engine.urllib.error.URLError("connection refused")))
+        result = engine.run("RETURN 1")
+
+    assert result.error and "no engine" in result.error, result
+    assert "connection refused" in result.error
+    assert len(reads) == 1, (
+        f"the engine URL was read {len(reads)} times for one call; the second "
+        f"read is in the error path, where it can raise")

@@ -196,6 +196,12 @@ def regulations_for_product(product_code: str) -> dict:
     `product_code` is the join hub — every openFDA endpoint carries it, and
     device *names* vary between endpoints, so a name is never the key.
 
+    `found` has three values, and the third is the point of it: `True` the code
+    exists, `False` the FDA publishes no such code, `None` the question was not
+    answered — check `error`. An empty `regulations` list with `found: True` is
+    a code that exists and carries no regulation number, which is a fact about
+    the source and not a gap in the load.
+
     product_code: e.g. "DXY"
     """
     # OPTIONAL, so "this product code is unregulated" and "there is no such
@@ -206,7 +212,7 @@ def regulations_for_product(product_code: str) -> dict:
         where = quoted(product_code)
     except Unbounded as exc:
         return {"product_code": product_code, "regulations": [], "count": 0,
-                "found": False, "error": str(exc)}
+                "found": None, "error": str(exc)}
 
     result = run(
         f"MATCH (p:ProductCode) WHERE p.product_code = {where} "
@@ -215,13 +221,27 @@ def regulations_for_product(product_code: str) -> dict:
         f"p.device_class AS device_class, p.medical_specialty AS specialty"
     )
     regulated = [r for r in result.rows if r.get("cfr_section") is not None]
+    # `found` is None when the query FAILED, not False.
+    #
+    # `bool(result.rows)` is False on an engine error too, so a failed call
+    # answered `found: False, regulations: []` — which reads as "there is no
+    # such product code", a statement about the FDA's catalogue, from a call
+    # that never reached the graph. That is the third meaning in an empty
+    # answer this module exists to keep out, arriving through the one field
+    # added to keep it out.
     return {"product_code": product_code, "regulations": regulated,
-            "count": len(regulated), "found": bool(result.rows),
+            "count": len(regulated),
+            "found": None if result.error else bool(result.rows),
             "error": result.error}
 
 
 def regulation_for_clearance(k_number: str) -> dict:
     """Which rule governs one clearance — the reverse lookup.
+
+    `found` has three values, same as `regulations_for_product`: `True` the
+    clearance exists, `False` the FDA published no such k-number, `None` the
+    question was not answered — check `error`. A row with a null `cfr_section`
+    is a clearance that exists whose product code carries no regulation.
 
     k_number: e.g. "K233820"
     """
@@ -229,7 +249,7 @@ def regulation_for_clearance(k_number: str) -> dict:
     # number reached an AttributeError instead of the error path every other
     # bad input in this module takes.
     if not isinstance(k_number, str):
-        return {"k_number": k_number, "governed_by": [], "found": False,
+        return {"k_number": k_number, "governed_by": [], "found": None,
                 "error": f"k_number must be a string, got {type(k_number).__name__}"}
     k_number = k_number.upper()
 
@@ -237,11 +257,11 @@ def regulation_for_clearance(k_number: str) -> dict:
     # a real clearance whose product code is unregulated indistinguishable from
     # a k-number that does not exist. `found` now means the CLEARANCE was
     # found; a null `cfr_section` means it exists and its category carries no
-    # regulation number.
+    # regulation number; `None` means the question was not answered at all.
     try:
         where = quoted(k_number)
     except Unbounded as exc:
-        return {"k_number": k_number, "governed_by": [], "found": False,
+        return {"k_number": k_number, "governed_by": [], "found": None,
                 "error": str(exc)}
 
     result = run(
@@ -252,8 +272,12 @@ def regulation_for_clearance(k_number: str) -> dict:
         f"s.decision_date AS decided, p.product_code AS product_code, "
         f"p.device_class AS device_class, r.cfr_section AS cfr_section"
     )
+    # `found` is None on a failure, for the same reason as
+    # `regulations_for_product`: `bool(result.rows)` is False when the engine
+    # never answered, and `found: False` is a claim about the FDA's catalogue.
     return {"k_number": k_number, "governed_by": result.rows,
-            "found": bool(result.rows), "error": result.error}
+            "found": None if result.error else bool(result.rows),
+            "error": result.error}
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +356,9 @@ def product_codes_by_class(device_class: str, limit: Limit = 25) -> dict:
 
     `cfr_section` is None where the FDA publishes no regulation number for a
     product code, which is a fact about the source rather than a gap in the
-    load — `unregulated` counts them so the caller need not.
+    load — `unregulated_in_page` counts them so the caller need not, and it
+    counts them IN THE PAGE rather than in the class, which is why it is named
+    that way: with a limit of 25 it says nothing about the rest.
     """
     try:
         rows_wanted = bounded(limit)
@@ -343,7 +369,7 @@ def product_codes_by_class(device_class: str, limit: Limit = 25) -> dict:
         # other — and the error path is where a caller is least able to guess.
         return {"device_class": device_class, "product_codes": [],
                 "rows_returned": 0, "unregulated_in_page": 0,
-                "unregulated_in_page": 0, "error": str(exc)}
+                "error": str(exc)}
 
     result = run(
         f"MATCH (p:ProductCode) WHERE p.device_class = {where} "

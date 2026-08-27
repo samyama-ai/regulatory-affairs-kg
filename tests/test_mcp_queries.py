@@ -29,8 +29,6 @@ import inspect
 
 import pytest
 
-from _pytest.outcomes import Failed
-
 from mcp_server import engine, queries
 from tests.mcp_support import return_aliases, server_tools
 
@@ -153,7 +151,9 @@ def test_a_reverse_lookup_of_a_non_string_is_an_error_not_an_attribute_error():
     or a number hit an AttributeError instead of the error path."""
     got = queries.regulation_for_clearance(None)
     assert got["error"] and "string" in got["error"], got
-    assert got["found"] is False
+    # `None`, not `False`. The tool never looked, so it cannot report that
+    # the FDA publishes no such k-number.
+    assert got["found"] is None
 
 
 # --------------------------------------------------------------------------
@@ -166,7 +166,9 @@ def test_the_refusal_reaches_the_caller_as_an_error_not_a_traceback():
     takes that route rather than raising into an agent."""
     out = queries.regulations_for_product('a\'b"c')
     assert out["error"] and "cannot be matched exactly" in out["error"]
-    assert out["regulations"] == [] and out["found"] is False
+    # `found` is None on a refusal: an argument this module will not send
+    # tells a caller nothing about whether the code exists.
+    assert out["regulations"] == [] and out["found"] is None
 
 
 def test_no_tool_raises_when_a_term_cannot_be_expressed():
@@ -233,7 +235,7 @@ def test_an_unreadable_node_count_is_treated_as_a_graph_worth_protecting(monkeyp
 
     monkeypatch.setattr(live.engine, "run",
                         lambda cypher: engine.Result(error="engine returned 500"))
-    with pytest.raises(Failed, match="could not be read"):
+    with pytest.raises(pytest.fail.Exception, match="could not be read"):
         live.held_or_fail("test")
 
 
@@ -244,7 +246,7 @@ def test_a_populated_engine_is_still_refused(monkeypatch):
 
     monkeypatch.setattr(live.engine, "run",
                         lambda cypher: engine.Result(rows=[{"n": 17168}]))
-    with pytest.raises(Failed, match="17,168 nodes"):
+    with pytest.raises(pytest.fail.Exception, match="17,168 nodes"):
         live.held_or_fail("test")
 
     # And an empty one passes, so the guard is not simply refusing everything.
@@ -370,3 +372,77 @@ def test_provenance_reports_nothing_when_only_the_last_query_fails(monkeypatch):
         f"caller that checks `error` last has already used them")
     assert got["by_label"] == []
     assert got["nodes_in_store"] is None
+
+
+def test_a_failed_query_does_not_answer_that_the_thing_does_not_exist(monkeypatch):
+    """`found: False` on an engine error is a claim about the FDA's catalogue,
+    made by a call that never reached the graph.
+
+    `bool(result.rows)` is False when the engine answered "no rows" and also
+    when it did not answer at all, so a failed lookup came back
+    `found: False, regulations: []` — the third meaning in an empty answer this
+    module exists to keep out, arriving through the one field that was added to
+    keep it out. `None` is the only honest value when the question was not
+    asked.
+
+    Both tools, because both had it, and both refusal paths, because a refused
+    argument tells you nothing about the catalogue either.
+    """
+    def failing(request, *a, **k):
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def read(self): return b'{"error": "the engine fell over"}'
+        return R()
+    monkeypatch.setattr(engine.urllib.request, "urlopen", failing)
+
+    for call in (lambda: queries.regulations_for_product("DXY"),
+                 lambda: queries.regulation_for_clearance("K233820")):
+        got = call()
+        assert got["error"], "the fixture was meant to fail the query"
+        assert got["found"] is None, (
+            f"a failed query answered found={got['found']!r}, which reads as "
+            f"'the FDA publishes no such thing' — from a call that never got "
+            f"an answer")
+
+    # A refused ARGUMENT says nothing about the catalogue either.
+    for got in (queries.regulations_for_product(None),
+                queries.regulation_for_clearance(None)):
+        assert got["error"], got
+        assert got["found"] is None, (
+            f"a refused argument answered found={got['found']!r}; the tool "
+            f"never looked, so it cannot report that nothing is there")
+
+
+def test_a_number_reaches_the_engine_as_the_text_a_value_is_stored_as(monkeypatch):
+    """`2.0` rendered `"2.0"` and `device_class` is stored as `"2"`.
+
+    So a caller sending the right argument got an empty answer with no error —
+    and JSON has no integer type distinct from float, so a client sending `2`
+    can arrive here as `2.0` through no fault of its own. `True` was worse:
+    `isinstance(True, int)` is true, so it rendered as the word `"True"`.
+    """
+    sent = []
+
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def read(self): return b'{"columns": [], "records": []}'
+
+    monkeypatch.setattr(engine.urllib.request, "urlopen",
+                        lambda request, *a, **k: (
+                            sent.append(json.loads(request.data)["query"]), R())[1])
+
+    queries.product_codes_by_class(2.0)
+    assert '"2"' in sent[0] and '"2.0"' not in sent[0], (
+        f"an integral float was sent as a fractional string, which matches no "
+        f"stored value: {sent[0]}")
+
+    for flag in (True, False):
+        refused = queries.product_codes_by_class(flag)
+        assert refused["error"], (
+            f"device_class={flag!r} was sent as the word {str(flag)!r}, which "
+            f"matches nothing and returns an empty answer with no error")
+
+    fractional = queries.product_codes_by_class(2.5)
+    assert fractional["error"], "a fractional class was sent as text"
