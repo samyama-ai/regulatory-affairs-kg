@@ -15,9 +15,37 @@ backslash that two builds reporting the same version disagree about.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+
 import pytest
 
 from mcp_server import engine
+
+
+@pytest.fixture
+def sanitised_log():
+    """Save and restore BOTH module-level records, rather than clearing them.
+
+    `cypher.reset()` empties `SANITISED` and `SANITISED_TOTAL` in place, so a
+    test calling it discards whatever a caller had accumulated and makes
+    itself order-dependent — and a trailing `reset()` is skipped entirely when
+    an earlier assertion fails, which leaks state into every test after it.
+
+    The same fixture `tests/test_load_openfda.py` already uses, extended to
+    the counter that was added beside the list. One pattern, in the repo that
+    argues a second copy of a fixture is how two suites come to describe
+    different states while both pass.
+    """
+    from etl import cypher
+
+    saved, totals = list(cypher.SANITISED), dict(cypher.SANITISED_TOTAL)
+    cypher.reset()
+    yield cypher
+    cypher.SANITISED[:] = saved
+    cypher.SANITISED_TOTAL.clear()
+    cypher.SANITISED_TOTAL.update(totals)
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -25,6 +53,7 @@ from mcp_server import engine
     ("O'Brien", chr(34) + "O'Brien" + chr(34)),
     ('say "hi"', chr(39) + 'say "hi"' + chr(39)),
 ])
+
 
 
 def test_a_literal_is_quoted_by_choosing_a_delimiter_not_by_escaping(value, expected):
@@ -235,12 +264,31 @@ def test_refusing_a_term_touches_no_global_and_takes_no_lock():
     assert engine.quoted("870.5150")
     assert cypher.SANITISED == before
 
-    assert not hasattr(engine, "_SANITISED_LOCK"), (
-        "the lock is still here, so something still mutates a global it does "
-        "not own")
+    # From the AST, not the text. `not hasattr(engine, "_SANITISED_LOCK")` is
+    # satisfied by renaming the lock, which changes nothing about what the
+    # module does; and a substring check on the source is satisfied — in the
+    # other direction — by the docstring that EXPLAINS why the global is no
+    # longer touched. Both were guards on spelling.
+    #
+    # What is asserted is that nothing in `quoted`'s body names the loader's
+    # record, and that it reaches the encoder through `lit_exact`.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(engine.quoted)))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    called = {getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+              for n in ast.walk(tree) if isinstance(n, ast.Call)}
+
+    assert "SANITISED" not in names and "SANITISED_TOTAL" not in names, (
+        "quoted() names the loader's record again; it should ask `lit_exact` "
+        "and let that raise")
+    assert "lit_exact" in called, (
+        "quoted() no longer goes through the shared encoder, so the two would "
+        "drift about what a representable value is")
+    assert not any(n.startswith("_SANITISED") for n in names), (
+        "a lock is back, which means something is mutating a shared list")
 
 
-def test_a_control_character_is_reported_by_the_loader_not_only_refused():
+def test_a_control_character_is_reported_by_the_loader_not_only_refused(sanitised_log):
     """The hole the watching could never close.
 
     `lit()` collapsed control characters to a space and recorded NOTHING, so
@@ -249,15 +297,46 @@ def test_a_control_character_is_reported_by_the_loader_not_only_refused():
     matched. Both halves are fixed by the same split: the loader records the
     collapse, and the query side refuses it.
     """
-    from etl import cypher
+    cypher = sanitised_log
 
-    cypher.reset()
     assert cypher.lit("a\nb") == '"a b"', "the loader still collapses, as it must"
     assert cypher.SANITISED, (
         "the loader collapsed a control character and recorded nothing, so a "
         "load report cannot say it happened")
     assert "control character" in cypher.SANITISED[-1]["reason"]
-    cypher.reset()
 
     with pytest.raises(engine.Unbounded):
         engine.quoted("a\nb")
+
+
+def test_the_sanitised_fixture_puts_back_what_it_found():
+    """Driven as a generator, because the thing under test is the teardown.
+
+    `cypher.reset()` empties both records in place, so a test calling it
+    discards whatever a caller had accumulated — and a trailing `reset()` is
+    skipped when an earlier assertion fails, leaking into every test after it.
+    The fixture saves and restores instead, which only helps if the restore
+    actually runs, and nothing in this suite currently depends on the state it
+    would leak. So it is asserted here rather than left to be noticed later.
+    """
+    from etl import cypher
+
+    cypher.SANITISED[:] = [{"original": "seeded", "reason": "seeded"}]
+    cypher.SANITISED_TOTAL.clear()
+    cypher.SANITISED_TOTAL["seeded"] = 7
+    try:
+        run = sanitised_log.__wrapped__()
+        inside = next(run)
+        assert inside.SANITISED == [] and inside.SANITISED_TOTAL == {}, (
+            "the fixture did not clear, so a test reads whatever ran before it")
+
+        inside.lit("a\tb")
+        assert inside.SANITISED and inside.SANITISED_TOTAL
+
+        next(run, None)          # teardown
+        assert cypher.SANITISED == [{"original": "seeded", "reason": "seeded"}], (
+            "the fixture did not restore the list it found")
+        assert cypher.SANITISED_TOTAL == {"seeded": 7}, (
+            "the counter was added beside the list and not restored with it")
+    finally:
+        cypher.reset()
