@@ -22,6 +22,15 @@ dev = ["pytest>=7.0", "ruff>=0.1.0"]
 include = ["etl*", "mcp_server*"]
 
 [tool.pytest.ini_options]
+markers = [
+    # A test that pins a limitation the loader works around. It is EXPECTED to
+    # fail when the engine gains the ability, and its docstring names the
+    # workaround to drop. Marked so that failure cannot be read as a defect in
+    # this repo, and so `pytest -m "not engine_limitation"` runs clean on any
+    # build — which matters because two builds reporting the same version
+    # answer the same query differently (DATASET-CARD issue 11).
+    "engine_limitation: expected to fail when the engine gains the ability it pins",
+]
 testpaths = ["tests"]
 # No serialisation marker: engine fixture keys carry a per-run suffix, so
 # concurrent runs cannot collide and teardown cannot cross-delete. An

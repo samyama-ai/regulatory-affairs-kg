@@ -6,24 +6,31 @@ constraint collision and a syntax form the engine does not parse. So it gets a t
 
 The engine-backed test is skipped unless one is reachable:
 
-    docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-    pytest tests/test_schema_cypher.py
+    docker run --rm -p 8299:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    SAMYAMA_TEST_URL=http://localhost:8299 pytest tests/test_schema_cypher.py
 
-Point it elsewhere with SAMYAMA_URL. The parse test below needs no engine and runs
-everywhere.
+**`SAMYAMA_TEST_URL`, with no default, and never 8080.** The schema statements
+this executes CREATE CONSTRAINTS, and a constraint cannot be dropped on this
+engine — so a run that finds an engine by accident changes it permanently. It
+read `SAMYAMA_URL` with a `localhost:8080` fallback, which is exactly finding
+one by accident. See `tests.mcp_support.writable_test_engine`.
+
+The parse test below needs no engine and runs everywhere.
 """
 
 import json
-import os
 import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-import pytest
+from tests.mcp_support import writable_test_engine
 
 SCHEMA = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
-SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
+
+
+def require_engine() -> str:
+    return writable_test_engine("tests/test_schema_cypher.py")
 
 
 def statements():
@@ -34,17 +41,9 @@ def statements():
     return [s.strip() for s in body.split(";") if s.strip()]
 
 
-def engine_available():
-    try:
-        urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2).read()
-        return True
-    except Exception:
-        return False
-
-
-def run(query):
+def run(query, url=None):
     req = urllib.request.Request(
-        f"{SAMYAMA_URL}/api/query",
+        f"{url or require_engine()}/api/query",
         data=json.dumps({"query": query}).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -83,14 +82,10 @@ def test_schema_executes_against_the_engine():
     all; skipping it silently is how "verified against the engine" ends up in
     the README on the strength of a run nobody made.
     """
-    if not engine_available():
-        message = f"no Samyama engine at {SAMYAMA_URL}"
-        if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
-            pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
-        pytest.skip(message)
+    url = require_engine()
     failures = []
     for statement in statements():
-        result = run(statement)
+        result = run(statement, url)
         if "error" in result:
             failures.append(f"{statement[:70]} -> {result['error'][:150]}")
     assert not failures, "statements failed:\n" + "\n".join(failures)

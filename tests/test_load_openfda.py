@@ -13,18 +13,16 @@ and asserts the counts did not move. It skips when no engine is reachable.
 """
 
 import json
-import os
-import urllib.request
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from etl.cypher import SANITISED, identifier, lit, merge, props, split_statements
+from tests.mcp_support import writable_test_engine
 from etl.load_openfda import (Engine, load_classifications, load_clearances,
                               select_smoke_rows, unresolvable_joins)
 
-SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
 
 
@@ -129,15 +127,19 @@ def test_the_answer_does_not_depend_on_what_is_already_in_the_graph():
 
     # Same inputs, no engine reachable at all. If the function had grown a
     # dependency on graph state this would raise rather than agree.
-    saved = os.environ.get("SAMYAMA_URL")
-    os.environ["SAMYAMA_URL"] = "http://localhost:1"
-    try:
+    #
+    # `monkeypatch`, not a hand-rolled save and restore. This set
+    # `os.environ` directly and put it back in a `finally`, which is correct
+    # until an assertion inside the block raises through a path that skips it
+    # — and the variable it leaves behind is the one that points every other
+    # engine-backed test in this repo at a graph.
+    #
+    # This is the LOADER's variable, deliberately: `etl.load_openfda` reads
+    # `SAMYAMA_URL`, and pointing it at a dead port is the whole point of the
+    # check. Selecting a TEST target is what must never come from it.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("SAMYAMA_URL", "http://localhost:1")
         assert unresolvable_joins(klass, clear) == expected
-    finally:
-        if saved is None:
-            os.environ.pop("SAMYAMA_URL", None)
-        else:
-            os.environ["SAMYAMA_URL"] = saved
 
 
 # --------------------------------------------------------------------------
@@ -391,37 +393,30 @@ def test_list_values_are_joined_not_repred():
 # against a live engine
 # --------------------------------------------------------------------------
 
-def engine_available() -> bool:
-    try:
-        with urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2) as response:
-            response.read()          # `with`, so the socket is not left open
-        return True
-    except Exception:
-        return False
+def require_engine() -> str:
+    """The engine these writing tests may use, or a skip naming why not.
 
+    **This module used to find one.** It read `SAMYAMA_URL` with a
+    `localhost:8080` default, so a plain `pytest` on a machine with any engine
+    on that port ran the whole engine-backed half against it — `MERGE`,
+    `CREATE CONSTRAINT`, then `DETACH DELETE` on teardown. The node count came
+    back to where it started, which is why it looked harmless; DATASET-CARD
+    issue 10 records what that delete does to the graph it ran in.
 
-def require_engine() -> None:
-    """Skip at call time, not at import time — or fail, if asked to.
+    The per-run key suffix below was the mitigation for this, and it is a good
+    one — it makes a stray write impossible to confuse with real data. It does
+    not stop the write. Selecting the engine is what stops it.
 
-    `pytest.mark.skipif(not engine_available())` freezes the decision during
-    collection: start the engine while the suite is collecting and the tests
-    still skip, reporting green for something that was never run.
-
-    Skipping is right for a local run. It is wrong for CI, because the claim
+    Resolved at call time, not at import: `pytest.mark.skipif(not
+    engine_available())` freezes the decision during collection, so starting an
+    engine while the suite collects reports green for something never run. And
+    `SAMYAMA_REQUIRE_ENGINE=1` turns the skip into a failure, because the claim
     these tests carry — every write is a MERGE, since a uniqueness constraint
-    in this engine does not reject a duplicate CREATE — is then proved by a
-    test nothing makes anyone run. Turn a MERGE back into a CREATE and the
-    suite still goes green.
-
-    So `SAMYAMA_REQUIRE_ENGINE=1` makes an unreachable engine a failure rather
-    than a skip. Local runs stay easy; CI cannot silently prove nothing.
+    here does not reject a duplicate CREATE — is otherwise proved by a test
+    nothing makes anyone run.
     """
-    if engine_available():
-        return
-    message = f"no Samyama engine at {SAMYAMA_URL}"
-    if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
-        pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
-    pytest.skip(message)
+    return writable_test_engine("tests/test_load_openfda.py")
+
 
 def fixture_rows(run: str) -> tuple[list[dict], list[dict], dict]:
     """Fixture data keyed to one run, so no two runs can touch each other.
@@ -471,7 +466,7 @@ def fresh_engine() -> Engine:
     and `fixture_rows` gives each run a distinct suffix so two runs cannot see
     or delete each other's rows.
     """
-    return Engine(SAMYAMA_URL, "default")
+    return Engine(require_engine(), "default")
 
 
 @pytest.fixture

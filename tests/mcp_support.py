@@ -12,7 +12,10 @@ import json
 import os
 import pathlib
 import textwrap
+import urllib.parse
 import urllib.request
+
+import pytest
 
 from mcp_server import engine
 
@@ -33,6 +36,52 @@ def engine_available(url: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def writable_test_engine(what: str) -> str:
+    """The engine a WRITING test may use, or a skip naming why there is none.
+
+    One implementation, called by every module that writes. There were three:
+    this pattern here, an inline copy of the port check in
+    `tests/test_mcp_live.py`, and — in `test_engine_limits.py` and
+    `test_schema_cypher.py` — no check at all. Those two defaulted
+    `SAMYAMA_URL` to `localhost:8080`, so a plain `pytest` on a machine with
+    any engine on that port silently attached to it and wrote `LimitProbe`
+    nodes into it. Observed against a container holding 17,168 nodes of an
+    unrelated graph, with nothing in the output naming the engine used —
+    because nothing had to be typed to select one.
+
+    Three rules, and each is here because the absence of it did damage:
+
+    **`SAMYAMA_TEST_URL` only, never `SAMYAMA_URL`, never a default.** A test
+    that writes and deletes must not be able to FIND an engine. Requiring its
+    own variable makes pointing these at a graph a decision somebody typed.
+
+    **Never port 8080.** That is where a demo engine runs, and advisory prose
+    in a README is not a guard.
+
+    **`SAMYAMA_REQUIRE_ENGINE=1` turns the skip into a failure.** A guard that
+    skips is indistinguishable from one that passes, so CI can demand the
+    engine-backed half actually ran.
+
+    `what` names the caller in the message: a skip that does not say which
+    suite went unrun is the same problem one layer up.
+    """
+    url = os.environ.get("SAMYAMA_TEST_URL")
+    if not url or not engine_available(url):
+        message = (f"{what}: no engine at SAMYAMA_TEST_URL" if not url
+                   else f"{what}: no engine at {url}")
+        if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
+            pytest.fail(
+                f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
+        pytest.skip(f"{message} — set it to a FRESH instance, never the demo engine")
+
+    if (urllib.parse.urlparse(url).port or 80) == 8080:
+        pytest.fail(
+            f"SAMYAMA_TEST_URL is {url}. Port 8080 is where a demo engine "
+            f"runs, and {what} WRITES to whatever it is pointed at. Use a "
+            f"different port.")
+    return url
 
 
 FIXTURE = [

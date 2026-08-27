@@ -12,14 +12,36 @@ a version nobody was running. Every check here asks the engine instead.
 `tests/test_schema_cypher.py::test_uses_the_syntax_the_engine_parses` is the
 same idea applied to the schema file.
 
-    docker run -d -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-    pytest tests/test_engine_limits.py
+    docker run -d --rm -p 8299:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+    SAMYAMA_TEST_URL=http://localhost:8299 pytest tests/test_engine_limits.py
 
-Skipped when no engine is reachable, unless SAMYAMA_REQUIRE_ENGINE=1.
+**Not 8080, and not `SAMYAMA_URL`.** These tests write, and the variable they
+read has no default, so they cannot find an engine by accident — see
+`tests.mcp_support.writable_test_engine` for what each rule is there to stop.
+Skipped when the variable is unset, unless SAMYAMA_REQUIRE_ENGINE=1.
+
+## Which of these are allowed to fail when the engine improves
+
+Two kinds live here and they are marked apart, because a failure means
+opposite things.
+
+**Controls** assert what the loader NEEDS to be true — that `SET` persists at
+all, that a bare numeral survives as a number. A failure is a real problem.
+
+**`@pytest.mark.engine_limitation`** marks the ones that pin a limitation the
+loader works around. A failure there is GOOD NEWS: the engine has gained
+something, and the docstring says which workaround to drop. They are marked so
+a failure cannot be mistaken for a defect in this repo, and so
+`pytest -m "not engine_limitation"` gives a clean run on any build.
+
+That distinction stopped being cosmetic on 2026-08-27: two builds reporting
+`"version": "1.7.0"` answer the same query differently (DATASET-CARD issue 11),
+so "this engine cannot do X" is not a property of a version number and a test
+asserting it will pass on one machine and fail on another with nothing to say
+why.
 """
 
 import json
-import os
 import urllib.error
 import urllib.request
 from uuid import uuid4
@@ -27,31 +49,26 @@ from uuid import uuid4
 import pytest
 
 from mcp_server.engine import Unbounded, quoted
+from tests.mcp_support import writable_test_engine
 
-SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
-
-
-def engine_available() -> bool:
-    try:
-        with urllib.request.urlopen(f"{SAMYAMA_URL}/api/tenants", timeout=2) as response:
-            response.read()
-        return True
-    except Exception:
-        return False
-
-
-def require_engine() -> None:
-    if engine_available():
-        return
-    message = f"no Samyama engine at {SAMYAMA_URL}"
-    if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
-        pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
-    pytest.skip(message)
+# NOT a module-level default any more.
+#
+# This read `SAMYAMA_URL`, falling back to `localhost:8080`, and every test
+# below WRITES — `CREATE`, `MERGE`, `DETACH DELETE`. So a plain `pytest` on a
+# machine with any engine on 8080 attached to it and wrote probe nodes into
+# somebody else's graph, with nothing in the output naming the engine, because
+# nothing had to be typed to choose one.
+#
+# Resolved per test now, through the one guard every writing module uses.
 
 
-def run(query: str) -> dict:
+def require_engine() -> str:
+    return writable_test_engine("tests/test_engine_limits.py")
+
+
+def run(query: str, url: str | None = None) -> dict:
     request = urllib.request.Request(
-        f"{SAMYAMA_URL}/api/query",
+        f"{url or require_engine()}/api/query",
         data=json.dumps({"query": query}).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -82,6 +99,7 @@ def value_of(key: str):
     'MATCH (n:LimitProbe) WHERE n.id = "{key}" SET n.txt = null',
     'MERGE (n:LimitProbe {{id: "{key}"}}) ON MATCH SET n.txt = null',
 ])
+@pytest.mark.engine_limitation
 def test_a_property_cannot_be_cleared(node, form):
     """`SET x = null` is accepted, reports success, and does nothing.
 
@@ -103,15 +121,20 @@ def test_a_property_cannot_be_cleared(node, form):
 
 
 def test_a_property_can_be_overwritten_with_a_real_value(node):
-    """The control. Without this, the test above could pass because SET does
-    nothing at all rather than because null specifically is ignored."""
+    """The control, and NOT an `engine_limitation`. Without it the test above
+    could pass because SET does nothing at all rather than because null
+    specifically is ignored — and a failure here is a real problem rather than
+    the engine having improved."""
     run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.txt = "after"')
     assert value_of(node) == "after", "SET does not persist at all — a bigger problem"
 
 
 def test_numbers_and_booleans_survive_as_themselves(node):
     """`lit()` emits these unquoted. If a future engine stopped accepting bare
-    numerals this would catch it before a load did."""
+    numerals this would catch it before a load did.
+
+    NOT an `engine_limitation`: this asserts what the loader needs to stay
+    true, so a failure is a regression rather than good news."""
     run(f'MATCH (n:LimitProbe) WHERE n.id = "{node}" SET n.num = 42, n.flag = true')
     records = run(
         f'MATCH (n:LimitProbe) WHERE n.id = "{node}" RETURN n.num, n.flag'
@@ -119,6 +142,7 @@ def test_numbers_and_booleans_survive_as_themselves(node):
     assert records[0] == [42, True], records
 
 
+@pytest.mark.engine_limitation
 def test_numeric_comparison_needs_a_numeric_property(node):
     """The reason `lit()` stopped quoting numbers: a numeric filter works
     against a number and is rejected against the string form."""
