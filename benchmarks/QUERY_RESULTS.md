@@ -1,6 +1,6 @@
 # Regulatory Affairs KG — query results
 
-> Measured 2026-08-26T09:54:27+00:00 · Samyama-Graph 1.1.0 · local Docker
+> Measured 2026-08-27T04:02:34+00:00 · Samyama-Graph **1.7.0** (image `public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0`) · local Docker
 > 28,496 nodes, 25,310 edges
 
 **Timings are client round-trip, not engine execution time.** The clock
@@ -48,7 +48,7 @@ The question this graph exists for. Two hops, because `regulation_number` is on 
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN count(s) AS clearances
 ```
 
-**8.7 ms** median of 5 (min 7.0, max 9.2)
+**6.6 ms** median of 5 (min 4.4, max 8.9)
 
 | clearances |
 |---|
@@ -65,7 +65,7 @@ The same traversal, returning rows rather than a count.
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) WHERE r.cfr_section = '870.5150' RETURN s.id AS clearance, s.applicant AS applicant, s.decision_date AS decided ORDER BY s.decision_date DESC LIMIT 5
 ```
 
-**8.0 ms** median of 5 (min 6.6, max 8.7)
+**7.2 ms** median of 5 (min 4.3, max 9.5)
 
 | clearance | applicant | decided |
 |---|---|---|
@@ -86,7 +86,7 @@ An aggregation across the whole graph. Answers which rules carry the most cleara
 MATCH (r:Regulation)<-[:GOVERNED_BY]-(:ProductCode)<-[:CLASSIFIED_AS]-(s:Submission) RETURN r.cfr_section AS cfr_section, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**22.4 ms** median of 5 (min 21.1, max 23.0)
+**21.8 ms** median of 5 (min 21.1, max 22.2)
 
 | cfr_section | clearances |
 |---|---|
@@ -112,7 +112,7 @@ One hop from the join hub. `product_code` is on every openFDA endpoint; device *
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.product_code = 'DXY' RETURN p.definition AS device_category, p.device_class AS class, r.cfr_section AS cfr_section
 ```
 
-**30.1 ms** median of 5 (min 23.4, max 34.0)
+**1.2 ms** median of 5 (min 1.2, max 1.5)
 
 | device_category | class | cfr_section |
 |---|---|---|
@@ -129,7 +129,7 @@ The reverse of the above, and the first half of a change-impact answer.
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE r.cfr_section = '870.5150' RETURN p.product_code AS product_code, p.definition AS category LIMIT 10
 ```
 
-**2.0 ms** median of 5 (min 1.8, max 2.3)
+**1.2 ms** median of 5 (min 1.2, max 1.3)
 
 | product_code | category |
 |---|---|
@@ -151,7 +151,7 @@ A point lookup through two hops — the query an inspector runs.
 MATCH (s:Submission)-[:CLASSIFIED_AS]->(p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE s.id = 'K233820' RETURN s.device_name AS device, p.product_code AS product_code, r.cfr_section AS cfr_section
 ```
 
-**104.5 ms** median of 5 (min 88.8, max 136.8)
+**1.2 ms** median of 5 (min 1.2, max 1.2)
 
 | device | product_code | cfr_section |
 |---|---|---|
@@ -168,7 +168,7 @@ A grouping over 19,127 submissions. **The distribution is an artifact of the sli
 MATCH (s:Submission) WHERE s.advisory_committee IS NOT NULL RETURN s.advisory_committee AS committee, count(s) AS clearances ORDER BY clearances DESC LIMIT 10
 ```
 
-**20.6 ms** median of 5 (min 16.3, max 24.2)
+**16.5 ms** median of 5 (min 15.9, max 27.4)
 
 | committee | clearances |
 |---|---|
@@ -186,7 +186,7 @@ A filtered scan with a join — the population a reviewer starts from. It is NOT
 MATCH (p:ProductCode)-[:GOVERNED_BY]->(r:Regulation) WHERE p.device_class = '3' RETURN count(DISTINCT p) AS class_three_with_a_regulation
 ```
 
-**13.3 ms** median of 5 (min 10.9, max 13.5)
+**8.3 ms** median of 5 (min 7.9, max 10.9)
 
 | class_three_with_a_regulation |
 |---|
@@ -203,7 +203,7 @@ The question a reviewer asks before trusting any answer above. Every node carrie
 MATCH (n) WHERE n.source IS NOT NULL RETURN n.source AS source, count(n) AS nodes ORDER BY nodes DESC
 ```
 
-**32.1 ms** median of 5 (min 23.2, max 46.7)
+**26.9 ms** median of 5 (min 22.8, max 27.9)
 
 | source | nodes |
 |---|---|
@@ -213,32 +213,39 @@ MATCH (n) WHERE n.source IS NOT NULL RETURN n.source AS source, count(n) AS node
 
 ---
 
-## A uniqueness constraint does not create an index
+## Does a uniqueness constraint create an index?
 
-The single most useful thing this suite measured. `schema/regulatory_affairs_kg.cypher`
-declares `ASSERT s.id IS UNIQUE` for each MERGE key — and a point lookup on
-one of those keys still scans the whole label.
+**Measured on this run, not remembered.** `schema/regulatory_affairs_kg.cypher`
+declares `ASSERT s.id IS UNIQUE` for each MERGE key. Whether that also indexes
+the key decides whether every point lookup scans the label — and it is the
+answer this page was originally built around, so it is re-derived each run
+rather than asserted.
+
+**On this engine it does.** A constraint declared on a probe label produced a `BTREE` entry in `SHOW INDEXES` immediately, with no `CREATE INDEX`.
+
+This page previously stated the opposite as its headline finding, and that
+statement was written against an earlier engine and never re-checked. It is
+recorded here because the correction matters more than the original claim:
+a page whose argument is that its numbers were measured should not carry a
+conclusion that stopped being true.
+
+The practical consequence is that the MERGE keys are **already indexed** by
+the schema on a freshly-loaded graph, so the before/after comparison below
+has nothing unindexed left to measure and correctly refuses.
 
 | Key | Nodes | Scan | Indexed | Speedup |
 |---|---:|---:|---:|---:|
-| `Submission.id` | 19,127 | 172.1 ms | 1.9 ms | **91×** |
-| `ProductCode.product_code` | 7,085 | 51.1 ms | 1.9 ms | **27×** |
-| `Regulation.cfr_section` | 2,284 | 23.6 ms | 1.8 ms | **13×** |
+| `Submission.id` | 19,127 | — | — | _already indexed — unindexed figure not measurable here_ |
+| `ProductCode.product_code` | 7,085 | — | — | _already indexed — unindexed figure not measurable here_ |
+| `Regulation.cfr_section` | 2,284 | — | — | _already indexed — unindexed figure not measurable here_ |
 
-The speedup tracks label size almost exactly, which is what a full scan
-looks like. The schema already records that a constraint in 1.1.0 declares
-the key rather than guarding an insert; it does not index it either, and
-that had not been measured until now.
-
-Every timing in the queries above is the **unindexed** figure, because that
-is what the shipped schema produces today. The indexes, where this run
-created any, are created at the end, so nothing above benefits from them.
+**These timings are not all unindexed.** `ConstraintIndexProbe.probe_id`, `ProductCode.product_code`, `Regulation.cfr_section`, `Submission.id` carried an index before this run started. Any query above that looks one of those up is an indexed figure, and the index comparison below refuses to report a speedup it cannot measure. For unindexed timings, run against a fresh instance.
 
 ---
 
 ## What the timings mean
 
-The slowest query here is **clearance to rule** at 104.5 ms. Every query is a median of 5 runs,
+The slowest query here is **provenance** at 26.9 ms. Every query is a median of 5 runs,
 because a single reading on a warm cache is not a measurement.
 
 These are **not** a comparison against another database. Nothing here has

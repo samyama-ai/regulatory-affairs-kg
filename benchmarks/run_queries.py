@@ -31,11 +31,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
 from benchmarks.measure import (
-    ENGINE,
+    IMAGE_TAG,
+    constraint_indexes,
+    engine_version,
+    existing_indexes,
     REPEATS,
     URL,
     index_effect,
@@ -136,12 +140,29 @@ def rendered(why: str, figures: dict, question: str) -> str:
 def report(url: str, with_index_effect: bool = True) -> str:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stats = shape(url)
+    # Read BEFORE the query loop: the timings below are only "unindexed" if the
+    # keys were unindexed when they were taken, and that is a fact about the
+    # instance rather than about whether the comparison was asked for.
+    # OBSERVED, not asserted. The page's finding is version-scoped and the
+    # version was a module constant, so a run against any other engine still
+    # stamped it. Measured: the image tagged 1.1.0 reports engine 1.7.0, so
+    # the constant was naming the TAG and reading as the engine.
+    version = engine_version(url)
+    host = urllib.parse.urlparse(url).hostname or url
+    where = "local Docker" if host in ("127.0.0.1", "localhost") else host
+
+    indexed_before = existing_indexes(url)
+
+    # Re-derived every run. See the section it feeds.
+    constraint = constraint_indexes(url)
+
     measured = [measure(q, url) for q in QUERIES]
 
     lines = [
         "# Regulatory Affairs KG — query results",
         "",
-        f"> Measured {stamp} · {ENGINE} · local Docker",
+        f"> Measured {stamp} · Samyama-Graph **{version}** "
+        f"(image `{IMAGE_TAG}`) · {where}",
         f"> {stats['nodes']:,} nodes, {stats['edges']:,} edges",
         "",
         "**Timings are client round-trip, not engine execution time.** The clock",
@@ -219,13 +240,40 @@ def report(url: str, with_index_effect: bool = True) -> str:
     lines += [
         "---",
         "",
-        "## A uniqueness constraint does not create an index",
+        "## Does a uniqueness constraint create an index?",
         "",
-        "The single most useful thing this suite measured. `schema/regulatory_affairs_kg.cypher`",
-        "declares `ASSERT s.id IS UNIQUE` for each MERGE key — and a point lookup on",
-        "one of those keys still scans the whole label.",
+        "**Measured on this run, not remembered.** `schema/regulatory_affairs_kg.cypher`",
+        "declares `ASSERT s.id IS UNIQUE` for each MERGE key. Whether that also indexes",
+        "the key decides whether every point lookup scans the label — and it is the",
+        "answer this page was originally built around, so it is re-derived each run",
+        "rather than asserted.",
         "",
     ]
+    if constraint["indexed_by_constraint"]:
+        lines += [
+            f"**On this engine it does.** A constraint declared on a probe label produced "
+            f"a `{constraint['entry'].get('type', 'index')}` entry in `SHOW INDEXES` "
+            f"immediately, with no `CREATE INDEX`.",
+            "",
+            "This page previously stated the opposite as its headline finding, and that",
+            "statement was written against an earlier engine and never re-checked. It is",
+            "recorded here because the correction matters more than the original claim:",
+            "a page whose argument is that its numbers were measured should not carry a",
+            "conclusion that stopped being true.",
+            "",
+            "The practical consequence is that the MERGE keys are **already indexed** by",
+            "the schema on a freshly-loaded graph, so the before/after comparison below",
+            "has nothing unindexed left to measure and correctly refuses.",
+            "",
+        ]
+    else:
+        lines += [
+            "**On this engine it does not.** A constraint declared on a probe label",
+            "produced no `SHOW INDEXES` entry, so the key is declared and not indexed,",
+            "and a point lookup on it scans the whole label. The comparison below is the",
+            "size of that cost.",
+            "",
+        ]
     # Bound before the branch: it is only assigned where the comparison runs,
     # and the prose gate below reads it on every path.
     measured_keys: list[dict] = []
@@ -264,12 +312,33 @@ def report(url: str, with_index_effect: bool = True) -> str:
             "that had not been measured until now.",
             "",
         ]
-    lines += [
-        "Every timing in the queries above is the **unindexed** figure, because that",
-        "is what the shipped schema produces today. The indexes, where this run",
-        "created any, are created at the end, so nothing above benefits from them.",
-        "",
-    ]
+    # Gated on what was ALREADY indexed when this run started, read before the
+    # query loop rather than inferred from whether the comparison ran.
+    #
+    # This paragraph printed unconditionally, including on exactly the run
+    # where it is false. Q4 and Q6 are point lookups on `product_code` and
+    # `s.id` — the keys the FIRST run indexes — so a second run against the
+    # same instance produces timings an order of magnitude faster under a
+    # sentence saying they are unindexed. And since the default invocation
+    # creates those indexes, the second run is the normal case, not the exotic
+    # one. `--print` never runs the comparison at all and still printed it.
+    if not indexed_before:
+        lines += [
+            "Every timing in the queries above is the **unindexed** figure, because that",
+            "is what the shipped schema produces today. The indexes, where this run",
+            "created any, are created at the end, so nothing above benefits from them.",
+            "",
+        ]
+    else:
+        already = ", ".join(f"`{label}.{prop}`" for label, prop in sorted(indexed_before))
+        lines += [
+            f"**These timings are not all unindexed.** {already} carried an index "
+            "before this run started. Any query above that looks one of those up is an "
+            "indexed figure, and "
+            "the index comparison below refuses to report a speedup it cannot measure. "
+            "For unindexed timings, run against a fresh instance.",
+            "",
+        ]
 
     slowest = slowest_of(measured)
     lines += [
@@ -327,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print:
         print(text)
     else:
-        OUT.write_text(text)
+        OUT.write_text(text, encoding="utf-8")  # the page carries — · ×
         # `relative_to` RAISES when the path is not under the cwd, so running
         # this from anywhere outside the repo crashed after the file was
         # already written — the work done, the report an exception.

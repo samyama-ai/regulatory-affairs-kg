@@ -8,6 +8,7 @@ counts from it would have produced a page wrong in a way nobody could see.
 
 from __future__ import annotations
 
+
 import re
 
 import pytest
@@ -17,7 +18,8 @@ from benchmarks import run_queries as bench
 from tests.benchmark_support import fake_stats
 
 
-def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None):
+def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None,
+                indexed_before=None, version=None, constraint=None):
     """Patch the three things `report()` calls out to, in one place.
 
     Six render tests set these up by hand, and the block runs to seven lines
@@ -32,6 +34,17 @@ def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None):
                         "min_ms": 1.0, "max_ms": 1.0}))
     monkeypatch.setattr(bench, "index_effect",
                         index_effect or (lambda url, sizes: []))
+    # `report()` reads this BEFORE the query loop, to decide whether the
+    # "these timings are unindexed" paragraph is true on this run.
+    monkeypatch.setattr(bench, "existing_indexes",
+                        lambda url: indexed_before or set())
+    # Observed from /api/status in a real run, so the stub has to supply it or
+    # every render test reaches the network.
+    monkeypatch.setattr(bench, "engine_version", lambda url: version or "1.7.0")
+    # Re-derived every run, so a render test has to say what the answer is.
+    monkeypatch.setattr(bench, "constraint_indexes", lambda url: (
+        constraint if constraint is not None else
+        {"label": "P", "indexed_by_constraint": False, "entry": None}))
 
 
 # --------------------------------------------------------------------------
@@ -171,7 +184,7 @@ def test_the_dry_run_renders_without_the_index_comparison(monkeypatch):
     def refuse(url, sizes):
         raise AssertionError("the index comparison ran during a dry run")
 
-    monkeypatch.setattr(bench, "index_effect", refuse)
+    stub_report(monkeypatch, index_effect=refuse)
     page = bench.report("http://x", with_index_effect=False)
     assert "Not measured on this run" in page, page[-400:]
     assert "speedup tracks label size" not in page, (
@@ -182,12 +195,7 @@ def test_the_speedup_claim_is_not_made_when_nothing_was_measured(monkeypatch):
     """The claim was emitted unconditionally, so a run finding every key
     already indexed printed "the speedup tracks label size almost exactly"
     above a table of dashes."""
-    monkeypatch.setattr(bench, "shape",
-                        lambda url: fake_stats())
-    monkeypatch.setattr(bench, "measure",
-                        lambda q, url: {**q, "rows": [], "median_ms": 1.0,
-                                        "min_ms": 1.0, "max_ms": 1.0})
-    monkeypatch.setattr(bench, "index_effect", lambda url, sizes: [
+    stub_report(monkeypatch, index_effect=lambda url, sizes: [
         {"key": "Submission.id", "nodes": 1, "scan_ms": None,
          "indexed_ms": None, "speedup": None, "note": "already indexed"}])
     page = bench.report("http://x")
@@ -343,3 +351,84 @@ def test_the_blank_definition_figures_come_from_the_graph(monkeypatch):
     assert "4,487" not in second, (
         "the figure did not move with the run — it is typed into the page, "
         "which is the exact thing the page promises it is not")
+
+
+def test_the_unindexed_claim_is_not_made_on_a_run_where_it_is_false(monkeypatch):
+    """The paragraph printed unconditionally, including on the run where it is
+    false — which is the COMMON one.
+
+    Q4 and Q6 are point lookups on `product_code` and `s.id`, the keys the
+    first run indexes. So a second run against the same instance produces
+    timings an order of magnitude faster under a sentence saying they are
+    unindexed, and the default invocation is what creates those indexes.
+    """
+    fresh = bench.report("http://x") if False else None  # documented below
+    stub_report(monkeypatch)
+    fresh = bench.report("http://x")
+    assert "is the **unindexed** figure" in fresh, (
+        "a genuinely unindexed run no longer says so")
+
+    stub_report(monkeypatch, indexed_before={("ProductCode", "product_code")})
+    second = bench.report("http://x")
+    assert "is the **unindexed** figure" not in second, (
+        "the page claimed unindexed timings on a run that started with an "
+        "index already in place")
+    assert "not all unindexed" in second
+    assert "`ProductCode.product_code`" in second, (
+        "the page does not say WHICH key was already indexed, so a reader "
+        "cannot tell which timings to distrust")
+
+
+def test_the_dry_run_also_gets_the_correct_claim(monkeypatch):
+    """`--print` runs no comparison at all, and still printed the unindexed
+    claim. The gate is read before the query loop precisely so this path is
+    covered too."""
+    stub_report(monkeypatch, indexed_before={("Submission", "id")})
+    page = bench.report("http://x", with_index_effect=False)
+    assert "is the **unindexed** figure" not in page
+    assert "not all unindexed" in page
+
+
+def test_the_constraint_finding_is_reported_from_this_run_not_asserted(monkeypatch):
+    """The page's headline was a claim in prose that was never re-checked, and
+    it stopped being true.
+
+    Measured on the engine these containers actually run: a uniqueness
+    constraint DOES produce a BTREE entry, and a point lookup goes 44.5 ms to
+    2.1 ms on it — with a subsequent `CREATE INDEX` adding nothing. The page
+    now reports whichever answer the run finds, so it cannot go stale again.
+    """
+    indexed = {"label": "P", "indexed_by_constraint": True,
+               "entry": {"label": "P", "property": "p", "type": "BTREE"}}
+    stub_report(monkeypatch, constraint=indexed)
+    page = bench.report("http://x")
+    assert "On this engine it does." in page
+    assert "BTREE" in page
+    assert "stopped being true" in page, (
+        "the page reports the new answer without recording that it contradicts "
+        "what this page used to assert")
+
+    stub_report(monkeypatch, constraint={"label": "P",
+                                         "indexed_by_constraint": False,
+                                         "entry": None})
+    other = bench.report("http://x")
+    assert "On this engine it does not." in other
+    assert "scans the whole label" in other
+
+
+def test_the_page_stamps_the_version_the_engine_reports(monkeypatch):
+    """It was a module constant, so a run against any engine stamped the same
+    string — and the finding on the page is version-scoped.
+
+    Worse than stale: the constant said 1.1.0 because that is the IMAGE TAG,
+    and every container from that tag reports engine 1.7.0. The page was
+    naming the tag and reading as the engine.
+    """
+    stub_report(monkeypatch, version="9.9.9")
+    page = bench.report("http://x")
+    assert "**9.9.9**" in page, "the observed version is not on the page"
+    assert "image `public.ecr.aws" in page, (
+        "the image tag is gone — it is what someone reads off `docker ps`, and "
+        "keeping both is what stops the two being confused again")
+
+

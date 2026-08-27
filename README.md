@@ -160,7 +160,7 @@ etl/          # openFDA probe, downloader and loader
 schema/       # cypher schema / ontology
 mcp_server/   # MCP server exposing the KG
 demo/         # narrated demo (cast + gif)
-benchmarks/   # benchmark queries
+benchmarks/   # the query catalogue, the runner, and the page it writes
 tests/        # pytest
 pyproject.toml
 ```
@@ -179,7 +179,7 @@ pyproject.toml
 | Predicate chains | ⬜ need PDF extraction; resolution rate unmeasured |
 | **Demo** | ✅ six questions, sub-25 ms, every number read at run time |
 | Snapshot | ⬜ 2.2 MB `.sgsnap` produced, **not yet published** — no release exists |
-| Query suite | ⬜ not started |
+| Query suite | ✅ nine measured queries, and a page the runner writes |
 
 ## License
 

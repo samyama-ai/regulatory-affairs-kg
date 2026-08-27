@@ -12,11 +12,13 @@ the CLI.
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
 
 from benchmarks import measure as bench
+from benchmarks import measure as bench_measure
 from tests.benchmark_support import counts, fake_stats, serve
 
 
@@ -311,3 +313,84 @@ def test_two_keys_on_one_label_each_report_their_own_baseline(monkeypatch):
     assert got["Submission.device_name"]["scan_ms"] == 40.0, (
         "the second key on this label reported the first key's baseline — the "
         "map is keyed by label again")
+
+
+def test_a_warm_up_round_is_discarded_and_the_median_is_the_median(monkeypatch):
+    """The median had no test: rewriting the loop to take one reading while
+    leaving `REPEATS = 5` passed green, as did swapping `median` for `fmean`.
+    The only guard was `REPEATS >= 3`, which pins a constant rather than a
+    behaviour.
+
+    It matters because two figures for the same operation disagreed by 65% on
+    the committed page — 30.1 ms as Q4 against 51.1 ms as the index baseline —
+    and cold start sitting inside the medians is the cause.
+    """
+    readings = iter([999.0, 10.0, 50.0, 20.0, 90.0, 30.0])
+    calls = []
+
+    def fake_run(cypher, url):
+        calls.append(cypher)
+        return {"columns": [], "records": []}, next(readings)
+    monkeypatch.setattr(bench_measure, "run", fake_run)
+    monkeypatch.setattr(bench_measure, "REPEATS", 5)
+
+    got = bench_measure.measure({"name": "Q", "cypher": "MATCH (n) RETURN n"},
+                                "http://x")
+    assert len(calls) == 6, (
+        "the warm-up round was not run, or REPEATS readings were not taken")
+
+    # Asserted on what `measure()` REPORTS, not on the raw timings. Checking
+    # the list only proved the warm-up was dropped; swapping
+    # `statistics.median` for `fmean` still passed, which is exactly the
+    # weakness this test was added for. The mean of these readings is 40 and
+    # the median is 30, so the two are now distinguishable.
+    assert got["median_ms"] == 30.0, (
+        f"the reported figure is {got['median_ms']}, which is the mean of the "
+        f"readings and not the median — a single slow round now moves the "
+        f"published number")
+    assert got["min_ms"] == 10.0 and got["max_ms"] == 90.0, (
+        "min/max no longer describe the readings the median came from")
+
+    # And the warm-up must not be inside any of the three.
+    assert 999.0 not in (got["median_ms"], got["min_ms"], got["max_ms"]), (
+        "the warm-up reading reached the page — cold start is being reported "
+        "as the figure, which is what made two numbers for one operation "
+        "disagree by 65%")
+
+
+def test_both_timing_callers_use_the_same_helper():
+    """They each kept their own loop, and that is how they drifted apart — one
+    measured the same point lookup 65% slower than the other on one page. The
+    warm-up fix has to apply to both or the disagreement returns."""
+    source = inspect.getsource(bench_measure)
+    body = source.split("def timed(")[1]
+    assert body.count("statistics.median(run(") == 0, (
+        "a second timing loop has reappeared alongside `timed()`")
+    assert "timed(" in inspect.getsource(bench_measure.measure)
+    assert "timed(" in inspect.getsource(bench_measure.index_effect)
+
+
+def test_a_version_that_cannot_be_read_stops_the_run(monkeypatch):
+    """The finding is version-scoped, so the page is not written against an
+    engine that cannot say what it is."""
+    def refuse(*a, **k):
+        raise bench_measure.urllib.error.URLError("no status endpoint")
+    monkeypatch.setattr(bench_measure.urllib.request, "urlopen", refuse)
+    with pytest.raises(SystemExit, match="could not read the engine version"):
+        bench_measure.engine_version("http://x")
+
+
+def test_a_count_query_that_answers_with_nothing_is_refused(monkeypatch):
+    """`rows_of(payload)[0]["c"]` was written at seven call sites, and every one
+    raised `IndexError` on an empty result or `KeyError` on a renamed alias —
+    from inside a run, as a traceback rather than a message.
+
+    The alias case is the live one: the stub answers any unmatched query with
+    `{"columns": ["c"], ...}`, so renaming `count(p) AS c` to `AS total` left
+    the suite green and would have been a KeyError against a real engine.
+    """
+    with pytest.raises(SystemExit, match="no rows for a count query"):
+        bench_measure.one_count({"columns": ["c"], "records": []}, "MATCH ...")
+    with pytest.raises(SystemExit, match="without its `c` column"):
+        bench_measure.one_count({"columns": ["total"], "records": [[7]]}, "MATCH ...")
+    assert bench_measure.one_count({"columns": ["c"], "records": [[7]]}, "x") == 7

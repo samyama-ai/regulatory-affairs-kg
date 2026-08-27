@@ -72,13 +72,25 @@ only way to get the figures.
 
 ## What it found
 
-The timings are the point of running it, but the most useful thing it measured
-was not a timing. **A uniqueness constraint in 1.1.0 declares the key and does
-not index it**, so every point lookup on a MERGE key scans the whole label.
+The timings are the point of running it, but the most useful thing it measures
+is not a timing: **does a uniqueness constraint also index the key?** If it does
+not, every point lookup on a MERGE key scans the whole label.
 
-The speedup tracks label size, which is what a scan looks like — the figures
-are in [`QUERY_RESULTS.md`](QUERY_RESULTS.md#a-uniqueness-constraint-does-not-create-an-index),
-written by the runner.
+This page used to answer that in prose — "it does not" — and the answer **had
+stopped being true**. On the engine these containers run, a constraint produces
+an index entry immediately, and a point lookup on a keyed label is fast on the
+constraint alone, with a subsequent `CREATE INDEX` adding nothing. The figures
+are on the generated page, not here, for the reason below.
+
+Two things made that easy to miss. The claim was written once and never
+re-checked, and the version it was scoped to was read off the **image tag** —
+every container from `samyama-graph:1.1.0` reports engine **1.7.0** on
+`/api/status`, so "1.1.0" named the tag and read as the engine.
+
+So the runner **measures it every run** now, against a namespaced probe label,
+and [`QUERY_RESULTS.md`](QUERY_RESULTS.md) reports whichever answer it finds
+along with the version the engine reported. A finding that can go stale
+silently is one this repo should not be carrying.
 
 **They are not repeated here on purpose.** A measured number copied into a
 second file drifts the moment the first is regenerated, and this table had
