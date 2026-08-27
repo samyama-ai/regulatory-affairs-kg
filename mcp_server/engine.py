@@ -28,7 +28,7 @@ from pathlib import Path
 
 # The loader's literal encoder, not a second one. `etl/cypher.py` is pure text
 # functions with no engine dependency, so this costs nothing and keeps one
-# measured implementation of "what 1.1.0 accepts inside a literal".
+# measured implementation of "what this engine accepts inside a literal".
 from etl.cypher import SANITISED, lit
 
 DEFAULT_URL = "http://127.0.0.1:8080"
@@ -241,7 +241,17 @@ def quoted(value) -> str:
     """A Cypher literal, via the encoder the loader already uses.
 
     **This used to escape with backslashes, which this engine does not have.**
-    `\\'` is a parse error in 1.1.0, not an escaped quote — measured, and
+    **Stated as measured behaviour, never as a version number.** `1.1.0` is
+    the image TAG; the engine behind it reports **1.7.0** on `/api/status`, so
+    every "1.1.0 cannot do X" in this repo named a version nobody was running
+    and could not visibly go stale. `tests/test_engine_limits.py
+    ::test_a_backslash_is_not_an_escape_character` asks the running engine
+    instead, in both directions — what the parser accepts inside a literal and
+    what a stored value matches back against — so the day a build starts
+    decoding escapes the suite fails rather than `quoted()` silently sending a
+    different term than the one asked for.
+
+    `\\'` is a parse error on this engine, not an escaped quote — measured, and
     recorded in DATASET-CARD.md known issue 6 and in `etl/cypher.lit`. So
     `regulations_for_product("O'Brien")` did not inline safely, it produced a
     statement the engine rejects, surfaced to the agent as "query rejected".
@@ -263,7 +273,7 @@ def quoted(value) -> str:
 
     **And a value `lit()` had to ALTER is refused rather than sent.** This is
     the one place the loader's encoder and a query encoder must differ. When a
-    value holds both quote characters, 1.1.0 can express neither, so `lit()`
+    value holds both quote characters, the engine can express neither, so `lit()`
     substitutes a typographic quote and records it in `SANITISED`. Writing a
     value that way is a recorded, reported compromise. MATCHING on one is not:
     the term compared against is no longer the term asked for, so the query
@@ -349,7 +359,7 @@ def quoted(value) -> str:
         raise Unbounded(
             f"the search term {value!r} {reason}, so it cannot be matched "
             f"exactly. "
-            f"Samyama-Graph 1.1.0 has no escape sequence inside a string "
+            f"This engine has no escape sequence inside a string "
             f"literal, so a value holding both quote characters cannot be "
             f"written at all. Returning an error rather than a query that "
             f"would find nothing and look like an empty answer.")

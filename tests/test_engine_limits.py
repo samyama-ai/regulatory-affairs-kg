@@ -1,8 +1,13 @@
 """Engine behaviours the loader is built around, asserted against a live engine.
 
-These tests exist to fail. Each one pins a limitation of Samyama-Graph 1.1.0
-that the loader works around, so that when a future version fixes it the suite
-says so instead of the workaround quietly outliving its reason.
+These tests exist to fail. Each one pins a behaviour the loader works around,
+so that when a future build changes it the suite says so instead of the
+workaround quietly outliving its reason.
+
+Pinned to the behaviour, never to a release number. `1.1.0` below is the IMAGE
+TAG; the engine behind it reports **1.7.0** on `/api/status`. A limitation
+recorded as "1.1.0 cannot do X" therefore never went stale visibly — it named
+a version nobody was running. Every check here asks the engine instead.
 
 `tests/test_schema_cypher.py::test_uses_the_syntax_the_engine_parses` is the
 same idea applied to the schema file.
@@ -20,6 +25,8 @@ import urllib.request
 from uuid import uuid4
 
 import pytest
+
+from mcp_server.engine import quoted
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 
@@ -124,3 +131,46 @@ def test_numeric_comparison_needs_a_numeric_property(node):
         "the engine now compares a numeric string against a number — quoting "
         "numbers would no longer break filtering, though it is still wrong"
     )
+
+
+def test_a_backslash_is_not_an_escape_character():
+    """The fact every Cypher literal in this repo is encoded around.
+
+    `etl.cypher.lit` chooses the quote style per value rather than escaping,
+    because a backslash escapes nothing here: `\\n` inside a literal is a
+    backslash followed by an n, not a newline. Nothing else in the suite would
+    notice if that changed.
+
+    And it would change silently. If a build starts decoding escapes,
+    `quoted("C:\\temp")` sends `C:` then `\\t`, the engine reads a TAB, and the
+    term matched is not the term asked for: no rows, no error, and an agent
+    reads the empty answer as "no such device". The whole of `mcp_server`
+    exists to keep that third meaning out of an empty list, and this is the
+    door it would come through.
+
+    Both directions, because they can diverge: what the parser accepts inside
+    a literal, and what a stored value matches back against. Measured
+    2026-08-27 on the engine reporting 1.7.0 — both hold.
+    """
+    require_engine()
+    for term in ("C:\\temp", "50\\%", "a\\nb"):
+        literal = quoted(term)
+        returned = run(f"RETURN {literal}")["records"]
+        assert returned and returned[0][0] == term, (
+            f"the engine decoded an escape in {literal}: it returned "
+            f"{returned and returned[0][0]!r} for the term {term!r}. Every "
+            f"literal in this repo is written on the assumption that it does "
+            f"not, so `quoted()` must now refuse a backslash rather than "
+            f"send one that changes the value silently.")
+
+        key = f"ESC-{uuid4().hex[:8].upper()}"
+        run(f'CREATE (n:EscapeProbe {{id: "{key}", txt: {literal}}})')
+        try:
+            back = run(f"MATCH (n:EscapeProbe) WHERE n.id = \"{key}\" AND "
+                       f"n.txt = {literal} RETURN count(n)")["records"]
+            assert back and back[0][0] == 1, (
+                f"{term!r} was stored as something the literal it was written "
+                f"with no longer matches, so a search for it returns an empty "
+                f"answer with no error.")
+        finally:
+            run(f'MATCH (n:EscapeProbe) WHERE n.id = "{key}" DETACH DELETE n')

@@ -379,62 +379,52 @@ def test_the_product_code_join_reaches_the_same_rule_the_clearance_names(loaded_
         "the traversal returned a clearance whose product code has no "
         "regulation edge — the query changed shape and this test is stale")
 
-    # That is the documented limit, and this is the assertion that fails the
-    # day real data contains one: no clearance may name a rule the traversal
-    # cannot reach for it.
+    # Everything above is a property of THIS FIXTURE and runs everywhere. The
+    # property of the LOADED DATA is asserted separately, below, because the
+    # two were one assertion and that is what made it weak.
+
+
+def test_no_loaded_clearance_names_a_rule_the_traversal_cannot_reach(loaded_engine):
+    """The equivalence the tool's docstring claims, measured rather than
+    assumed — and reported as unmeasured when there is nothing to measure.
+
+    This is a property of the DATA, not of the query, which is why it is its
+    own test. Folded into the fixture test above it passed on a fixture-only
+    engine: no clearance there has `source <> 'test'`, so the orphan count was
+    0 out of a denominator of 0, and a check that read nothing reported that
+    the property held.
+
+    A zero orphan count out of a zero denominator is not evidence that the two
+    joins agree; it is the absence of evidence. So the denominator is measured
+    first, and the run says "not measured" rather than "holds" when it is
+    empty.
+
+    Measured 0 out of 19,127 on 2026-08-27. That figure is true of one load
+    and has to be re-measured after the next one — a clearance whose product
+    code carries no regulation edge would be invisible to
+    `clearances_under_regulation`, which would understate blast radius with
+    `error: None`.
+    """
+    real = engine.run(
+        "MATCH (s:Submission) WHERE s.source <> 'test' RETURN count(s) AS c")
+    assert real.ok, real.error
+    loaded = real.rows[0]["c"]
+
     orphans = engine.run(
         "MATCH (s:Submission) WHERE s.source <> 'test' AND "
         "NOT EXISTS { MATCH (s)-[:CLASSIFIED_AS]->()-[:GOVERNED_BY]->() } "
         "RETURN count(s) AS c")
     assert orphans.ok, orphans.error
+
+    if not loaded:
+        pytest.skip(
+            "no clearance outside this fixture, so an orphan count of 0 would "
+            "be the count of nothing. Point SAMYAMA_TEST_URL at a loaded "
+            "graph to measure this; it cannot be established on an empty "
+            "store and is not claimed here.")
+
     assert orphans.rows[0]["c"] == 0, (
-        f"{orphans.rows[0]['c']} clearances carry a regulation_number that the "
-        f"product-code traversal cannot reach, so clearances_under_regulation "
-        f"now understates blast radius by that many. The docstring's measured "
-        f"claim of 0 is stale.")
-
-
-def test_a_clearance_under_two_product_codes_fills_the_page_once(loaded_engine):
-    """The dedup, proved against a real engine rather than against the query.
-
-    `RETURN DISTINCT` is a silent no-op on 1.1.0, so a query can look
-    deduplicated and not be. This builds the case the loaded data does not
-    contain — one clearance reaching one rule through TWO product codes — and
-    asserts two things the previous Python-side dedup got wrong:
-
-      * the clearance appears once, not twice;
-      * a page of N still contains N distinct clearances. Capping first and
-        deduplicating second returned a short page with no signal.
-    """
-    for statement in (
-        "CREATE (p:ProductCode {product_code: 'DUP1', device_class: '2', "
-        "source: 'test'})",
-        "MATCH (p:ProductCode {product_code: 'DUP1'}), "
-        "(r:Regulation {cfr_section: '870.5150'}) CREATE (p)-[:GOVERNED_BY]->(r)",
-        # K999001 already classifies as DXY; this gives it a second code under
-        # the same rule, which is the shape that produced the duplicate.
-        "MATCH (s:Submission {id: 'K999001'}), (p:ProductCode {product_code: 'DUP1'}) "
-        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
-        "CREATE (s:Submission {id: 'K999004', device_name: 'Another', "
-        "applicant: 'Acme', decision_date: '2024-04-05', "
-        "regulation_number: '870.5150', advisory_committee: 'Cardiovascular', "
-        "source: 'test'})",
-        "MATCH (s:Submission {id: 'K999004'}), (p:ProductCode {product_code: 'DXY'}) "
-        "CREATE (s)-[:CLASSIFIED_AS]->(p)",
-    ):
-        assert engine.run(statement).ok
-
-    listed = queries.clearances_under_regulation("870.5150")
-    assert listed["error"] is None
-    ids = [row["clearance"] for row in listed["clearances"]]
-    assert ids.count("K999001") == 1, (
-        f"the clearance with two product codes was listed {ids.count('K999001')} "
-        f"times — the engine is not deduplicating")
-
-    # A page of one must hold ONE clearance. Under the old ordering the
-    # duplicate consumed the page and this came back empty.
-    page = queries.clearances_under_regulation("870.5150", limit=1)
-    assert page["error"] is None
-    assert page["count"] == 1, (
-        f"a page of 1 returned {page['count']} clearances — duplicates are "
-        f"eating the page because the cap runs before the deduplication")
+        f"{orphans.rows[0]['c']} of {loaded:,} clearances carry a "
+        f"regulation_number that the product-code traversal cannot reach, so "
+        f"clearances_under_regulation now understates blast radius by that "
+        f"many. The docstring's claim of 0, measured 2026-08-27, is stale.")

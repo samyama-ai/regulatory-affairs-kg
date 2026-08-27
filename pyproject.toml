@@ -9,6 +9,10 @@ dependencies = [
     "rich>=13.0",
     "click>=8.0",
     "fastmcp>=0.1.0",
+    # Declared directly, not leaned on as a fastmcp transitive: mcp_server/
+    # queries.py imports it for the `Limit` annotation, and queries.py is the
+    # half of the server that must import without fastmcp installed.
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]

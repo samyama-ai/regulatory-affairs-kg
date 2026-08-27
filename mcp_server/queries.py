@@ -40,10 +40,43 @@ when this file passed the 500-line review limit. `run`, `bounded`, `quoted` and
 
 from __future__ import annotations
 
+from typing import Annotated
+
+from pydantic import BeforeValidator
+
 from mcp_server.engine import Unbounded, bounded, quoted, run
 
 
-def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
+def _not_a_flag(value):
+    """Refuse `true`/`false` before anything can turn it into a number.
+
+    `bounded()` already refuses a bool, and on a direct Python call it does.
+    Through the MCP server it never sees one: fastmcp builds a pydantic model
+    from these signatures, and pydantic reads `True` as a valid `int` and
+    hands `bounded()` a plain `1` (measured — `TypeAdapter(int)
+    .validate_python(True)` returns `1`). So `limit=true` from an agent
+    silently became a one-row page with `error: None`: an answer that looks
+    like the end of the data rather than a rejected argument, which is the
+    one outcome this module exists to prevent.
+
+    Only the bool is refused here. Bounds and their messages stay in
+    `bounded()`, so there is one place that decides what a limit may be
+    rather than two that can disagree.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            "limit must be a whole number, not true/false. `true` would be "
+            "read as 1 and return a one-row page that reads like the end of "
+            "the data.")
+    return value
+
+
+#: Every tool's `limit`. Named once so a tool added later cannot quietly get
+#: the unguarded `int` that this annotation exists to replace.
+Limit = Annotated[int, BeforeValidator(_not_a_flag)]
+
+
+def clearances_under_regulation(cfr_section: str, limit: Limit = 25) -> dict:
     """Every clearance governed by one 21 CFR section.
 
     The change-impact query: a rule changes, and this is what is affected.
@@ -55,17 +88,22 @@ def clearances_under_regulation(cfr_section: str, limit: int = 25) -> dict:
     and a clearance whose product code carries no `GOVERNED_BY` edge is
     invisible to this one.
 
-    Measured on the loaded graph rather than assumed: all 19,127 Submissions
-    are reachable this way, and for every one of them the regulation the
-    traversal reaches is the same as the `regulation_number` on the record —
-    **0 disagreements**. So the two paths are equivalent here today. 902
-    ProductCodes carry no regulation edge, but no Submission classifies as one
-    of them, which is why the gap is zero rather than small.
+    Measured on the loaded graph rather than assumed, **on 2026-08-27**: all
+    19,127 Submissions are reachable this way, and for every one of them the
+    regulation the traversal reaches is the same as the `regulation_number` on
+    the record — **0 disagreements**. 902 ProductCodes carry no regulation
+    edge, but no Submission classifies as one of them, which is why the gap is
+    zero rather than small.
 
-    That equivalence is a property of the DATA and not of this query, so
-    `tests/test_mcp_live.py` asserts it: the day a clearance arrives whose
-    product code is unregulated, this tool starts understating blast radius and
-    the suite says so instead of the answer quietly shrinking.
+    That is a property of one LOAD, not of this query, so it is stated with a
+    date and re-measured rather than carried forward. `tests/test_mcp_live.py
+    ::test_no_loaded_clearance_names_a_rule_the_traversal_cannot_reach` runs it
+    against whatever is loaded: the day a clearance arrives whose product code
+    is unregulated, this tool starts understating blast radius and the suite
+    says so instead of the answer quietly shrinking. On a graph with no loaded
+    data that test reports itself unmeasured rather than passing — a zero
+    orphan count out of a zero denominator was how it used to pass having read
+    nothing.
 
     Returns `clearance`, `device`, `applicant`, `decided`, `product_code`;
     `count` is the number of rows RETURNED, capped by `limit` — use
@@ -222,7 +260,7 @@ def regulation_for_clearance(k_number: str) -> dict:
 # shape of the graph — what a reviewer asks before trusting an answer
 # ---------------------------------------------------------------------------
 
-def busiest_regulations(limit: int = 10) -> dict:
+def busiest_regulations(limit: Limit = 10) -> dict:
     """The rules carrying the most clearances — where a change hurts most."""
     try:
         rows_wanted = bounded(limit)
@@ -244,7 +282,7 @@ def busiest_regulations(limit: int = 10) -> dict:
             "error": result.error}
 
 
-def clearances_by_advisory_committee(limit: int = 15) -> dict:
+def clearances_by_advisory_committee(limit: Limit = 15) -> dict:
     """Clearances grouped by the FDA advisory committee that reviewed them.
 
     This replaces a `pending_by_authority` tool that could not be built.
@@ -269,7 +307,7 @@ def clearances_by_advisory_committee(limit: int = 15) -> dict:
             "error": result.error}
 
 
-def product_codes_by_class(device_class: str, limit: int = 25) -> dict:
+def product_codes_by_class(device_class: str, limit: Limit = 25) -> dict:
     """Device categories at one risk class.
 
     device_class: measured values are "1", "2", "3", "N", "U" and "f" — not

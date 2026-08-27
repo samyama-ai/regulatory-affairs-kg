@@ -3,6 +3,12 @@
 Eight tools over the loaded graph. Every one runs a traversal that
 `demo/demo.py` already proves works on real FDA data.
 
+The image tag is `1.1.0`; the engine behind it reports **1.7.0** on
+`/api/status`. Nothing here is written against either number — every engine
+behaviour these tools depend on is asserted against the running engine by
+`tests/test_engine_limits.py`, because a limitation recorded as "1.1.0 cannot
+do X" names a version nobody is running and so never goes stale visibly.
+
 ```bash
 docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 python -m etl.download_openfda && python -m etl.load_openfda
@@ -33,12 +39,17 @@ exact joins on government-issued codes, but they are different paths, and a
 clearance whose product code carries no regulation edge is invisible to this
 one.
 
-Measured on the loaded graph: all **19,127** clearances are reachable this way,
-and the regulation the traversal reaches equals the `regulation_number` on the
-record for every one of them — **0 disagreements**. 902 product codes carry no
-regulation edge, but no clearance classifies as one of them. A live test
-asserts that equivalence, so the day it stops holding the suite says so rather
-than the answer quietly shrinking.
+Measured on the loaded graph **on 2026-08-27**: all **19,127** clearances are
+reachable this way, and the regulation the traversal reaches equals the
+`regulation_number` on the record for every one of them — **0 disagreements**.
+902 product codes carry no regulation edge, but no clearance classifies as one
+of them.
+
+That is true of one load rather than of the query, so it carries a date and is
+re-measured after each one. A live test runs it against whatever is loaded and
+reports itself **unmeasured** on an empty store rather than passing, so the day
+the equivalence stops holding the suite says so rather than the answer quietly
+shrinking.
 
 ## Two tools are separate on purpose
 

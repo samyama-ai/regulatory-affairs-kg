@@ -7,9 +7,11 @@ end up describing different graphs while both pass.
 """
 
 import ast
+import inspect
 import json
 import os
 import pathlib
+import textwrap
 import urllib.request
 
 from mcp_server import engine
@@ -114,3 +116,96 @@ def serve(monkeypatch, payload):
         def __exit__(self, *a): return False
         def read(self): return json.dumps(payload).encode()
     monkeypatch.setattr(engine.urllib.request, "urlopen", lambda *a, **k: R())
+
+
+def return_aliases(cypher: str) -> list[str]:
+    """The column names a statement's own RETURN clause produces.
+
+    A fake engine that hardcodes its columns cannot fail when the query's
+    aliases change. Renaming `count(DISTINCT s) AS total` to `AS c` left the
+    fake still answering a column called `total`, so the tool read its figure
+    out of a column the real engine would no longer send, and the suite stayed
+    green. Columns derived from the statement under test cannot drift away
+    from it.
+
+    Deliberately a small parser rather than a full one: these are the repo's
+    own statements, and anything it cannot read it refuses instead of
+    returning an empty list, which would fake a result with no columns at all.
+    """
+    _, sep, tail = cypher.rpartition("RETURN ")
+    if not sep:
+        raise AssertionError(f"no RETURN clause to read columns from: {cypher!r}")
+    for stop in (" ORDER BY ", " LIMIT ", " SKIP "):
+        tail = tail.split(stop)[0]
+
+    names, depth, item = [], 0, ""
+    for ch in tail:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            names.append(item)
+            item = ""
+        else:
+            item += ch
+    names.append(item)
+
+    columns = []
+    for name in names:
+        name = name.strip()
+        lowered = name.lower()
+        if " as " in lowered:
+            name = name[lowered.rindex(" as ") + 4:].strip()
+        else:
+            name = name.split(".")[-1].strip()
+        if not name:
+            raise AssertionError(f"unreadable RETURN item in {cypher!r}")
+        columns.append(name)
+    return columns
+
+
+def cypher_text(node) -> str:
+    """One Cypher statement as text, from the AST node that spells it.
+
+    Interpolated values become `?`: a value is not a keyword, and rendering it
+    as one would let `f"...{clause}"` satisfy a check for a clause the
+    statement does not contain.
+    """
+    if isinstance(node, ast.Constant):
+        return str(node.value)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(cypher_text(part) for part in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return " ? "
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return cypher_text(node.left) + cypher_text(node.right)
+    raise AssertionError(
+        f"a statement is built in a way this reader cannot follow "
+        f"({type(node).__name__}); it would be skipped rather than checked")
+
+
+def statements_of(function) -> list[str]:
+    """Every Cypher statement a tool passes to `run()`, read from the AST.
+
+    Not from the source text. The first version of the ordering check scanned
+    raw source and was defeated by its own explanatory comment, which contains
+    the words it looked for. Stripping `#` comments closed that and left the
+    docstrings, so writing "ORDER BY" into prose still passed a query that had
+    lost the clause. The AST sees only the argument actually sent.
+
+    Refuses rather than returns nothing: a tool whose statements cannot be
+    found is a tool no check ran against, and an empty list reads as a pass.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    found = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "run"
+                and node.args):
+            found.append(cypher_text(node.args[0]))
+    if not found:
+        raise AssertionError(
+            f"no statement found in {function.__name__}; a check over an "
+            f"empty list passes without reading anything")
+    return found

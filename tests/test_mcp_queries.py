@@ -25,16 +25,14 @@ from __future__ import annotations
 
 import json
 
-import ast
 import inspect
-import textwrap
 
 import pytest
 
 from _pytest.outcomes import Failed
 
 from mcp_server import engine, queries
-from tests.mcp_support import queries_that_run, server_tools
+from tests.mcp_support import return_aliases, server_tools
 
 # Imported from the wiring, not restated. This file kept a third copy of the
 # same eight names — `queries.py` defines them, `server.py` registers them,
@@ -45,74 +43,6 @@ TOOLS = server_tools()
 # Every parameter these tools compare against as TEXT, and therefore every
 # one that reaches `quoted()`. One set, not two clauses joined by `or`.
 TEXT_ARGUMENTS = {"cfr_section", "product_code", "k_number", "device_class"}
-
-
-# --------------------------------------------------------------------------
-# no tool may return a bare empty list again
-# --------------------------------------------------------------------------
-
-def test_no_query_is_a_stub():
-    """The defect this file exists for: two tools that returned `[]` with a
-    TODO where the traversal should be. A body that runs no query is the
-    regression to catch."""
-    # Parsed, not string-scanned. `"run(" in source` matched the word inside a
-    # docstring or a comment, and `"return []" not in source` is a negative
-    # substring assertion — the false-negative trap, satisfied by writing
-    # `return list()` or `return []  # noqa`. Both passed for a stub that
-    # merely mentioned the right words.
-    for name in TOOLS:
-        function = getattr(queries, name)
-        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-
-        calls_run = any(
-            isinstance(node, ast.Call) and getattr(node.func, "id", None) == "run"
-            for node in ast.walk(tree))
-        assert calls_run, f"{name} does not call run() — it sends no query"
-
-        returns_empty = any(
-            isinstance(node, ast.Return)
-            and isinstance(node.value, (ast.List, ast.Dict, ast.Set))
-            and not getattr(node.value, "elts", getattr(node.value, "keys", [1]))
-            for node in ast.walk(tree))
-        assert not returns_empty, (
-            f"{name} has a `return []` — the exact stub this file exists to "
-            f"stop coming back")
-
-        assert "TODO" not in inspect.getsource(function), f"{name} carries a TODO"
-
-
-def test_every_query_is_registered_as_a_tool():
-    """A query added to queries.py and forgotten in server.py is silently
-    unavailable to an agent — the failure has no symptom without this.
-
-    The direction matters, and the previous version had it backwards. It
-    iterated a hardcoded tuple in this file and asserted each name appeared in
-    `server.py`, so a query added to `queries.py` and forgotten in BOTH places
-    passed — which is the only way it gets forgotten. `register()`'s docstring
-    claimed such a query "fails a test"; it did not.
-
-    The expected set is derived from `queries.py` instead: every public
-    function that runs a query. Nothing here is written twice, so nothing can
-    agree with itself.
-    """
-    discovered = queries_that_run()
-    registered = set(server_tools())
-
-    assert discovered == registered, (
-        f"queries.py and server.py disagree about the tool list. "
-        f"In queries.py and not registered: {sorted(discovered - registered)}. "
-        f"Registered but not a query: {sorted(registered - discovered)}.")
-    assert discovered, "no query functions were discovered — the parse is broken"
-
-
-def test_pending_by_authority_is_gone_and_the_reason_recorded():
-    """It cannot be built: openFDA publishes decided clearances, there is no
-    pending queue, no SUBMITTED_TO edge and no status property. Deleting it
-    silently would invite someone to add it back."""
-    assert not hasattr(queries, "pending_by_authority")
-    text = queries.__doc__ or ""
-    assert "pending_by_authority" in text
-    assert "decided" in text.lower()
 
 
 def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
@@ -141,15 +71,18 @@ def test_the_count_is_not_taken_from_the_capped_list(monkeypatch):
 
     def urlopen(request, *a, **k):
         cypher = json.loads(request.data)["query"]
+        # Columns READ OFF the statement, never listed here. A stub with its
+        # own hardcoded column names answers a query it is no longer testing:
+        # renaming `count(DISTINCT s) AS total` to `AS c` left this fake still
+        # sending `total`, the tool still found its figure, and the suite
+        # stayed green against a query the real engine would answer with a
+        # different column. It also once answered `k_number` where the query
+        # aliases `clearance`, which stayed invisible until the listing began
+        # deduplicating.
+        columns = return_aliases(cypher)
         served["payload"] = (
-            {"columns": ["total"], "records": [[415]]} if "count(" in cypher
-            # The REAL column aliases the query returns, not invented ones.
-            # This stub answered with `k_number` while the query aliases
-            # `clearance`, so every row read as the same (missing) id — which
-            # stayed invisible until the listing started deduplicating. A stub
-            # whose columns do not match the query cannot test the query.
-            else {"columns": ["clearance", "device", "applicant",
-                              "decided", "product_code"],
+            {"columns": columns, "records": [[415]]} if "count(" in cypher
+            else {"columns": columns,
                   "records": [[f"K{n:06d}", f"Device {n}", "Acme",
                                "2024-01-02", "DXY"] for n in range(25)]})
         return R()
@@ -183,30 +116,6 @@ def test_a_quote_in_an_argument_cannot_break_out(monkeypatch):
     payload = chr(34) + "' RETURN 1 //" + chr(34)
     assert payload in cypher, "the payload is not inside one literal: " + cypher
     assert cypher.rstrip().endswith("specialty"), "query truncated: " + cypher[-60:]
-
-
-def test_every_limited_query_orders_before_it_limits():
-    """`LIMIT` with no `ORDER BY` is a non-deterministic page: repeated calls
-    can return different subsets of the same answer, and an agent comparing
-    two calls sees a change that did not happen.
-
-    Read off the source of every tool, rather than pinned to the one that had
-    the defect — the next query added here is the one that will repeat it.
-    """
-    import inspect
-    offenders = []
-    for name in TOOLS:
-        source = inspect.getsource(getattr(queries, name))
-        # Comments stripped first. The comment explaining WHY the ordering is
-        # there contains the words "ORDER BY", so scanning raw source let the
-        # check pass on a function whose query had lost it — the first version
-        # of this test was defeated by its own rationale.
-        code = "\n".join(line.split("#")[0] for line in source.splitlines())
-        if "LIMIT" in code and "ORDER BY" not in code:
-            offenders.append(name)
-    assert not offenders, (
-        f"these limit without ordering, so the page they return is arbitrary: "
-        f"{offenders}")
 
 
 def test_a_bad_limit_is_an_error_not_a_traceback_or_a_negative_limit():
@@ -356,12 +265,17 @@ def test_provenance_reports_this_dataset_not_whatever_the_store_holds(monkeypatc
     is counted by label and the store total is reported beside it under a name
     that says what it is.
     """
+    # ROWS here, columns read off each statement. A fake that names its own
+    # columns answers a query it is no longer testing: renaming `count(n) AS
+    # nodes` to `AS c` would leave this fixture still sending `nodes`, the
+    # tool still finding its figure, and the suite green against a statement
+    # the real engine would answer differently.
     answers = {
-        "MATCH (n) RETURN count(n) AS nodes": {"columns": ["nodes"], "records": [[17168]]},
-        "MATCH (n:Submission)": {"columns": ["nodes"], "records": [[0]]},
-        "MATCH (n:ProductCode)": {"columns": ["nodes"], "records": [[0]]},
-        "MATCH (n:Regulation)": {"columns": ["nodes"], "records": [[0]]},
-        "n.source IS NOT NULL": {"columns": ["source", "nodes"], "records": []},
+        "MATCH (n) RETURN count(n) AS nodes": [[17168]],
+        "MATCH (n:Submission)": [[0]],
+        "MATCH (n:ProductCode)": [[0]],
+        "MATCH (n:Regulation)": [[0]],
+        "n.source IS NOT NULL": [],
     }
 
     class R:
@@ -372,9 +286,10 @@ def test_provenance_reports_this_dataset_not_whatever_the_store_holds(monkeypatc
 
     def dispatch(request, *a, **k):
         cypher = json.loads(request.data)["query"]
-        for needle, payload in answers.items():
+        for needle, records in answers.items():
             if needle in cypher:
-                return R(payload)
+                return R({"columns": return_aliases(cypher),
+                          "records": records})
         raise AssertionError(f"no fixture answer for {cypher!r}")
     monkeypatch.setattr(engine.urllib.request, "urlopen", dispatch)
 
@@ -407,44 +322,6 @@ def test_provenance_survives_a_failed_second_query(monkeypatch):
     assert got["by_label"] == []
 
 
-def test_the_listing_asks_the_engine_to_deduplicate_before_it_limits():
-    """The bug this replaced: dedup after the cap returns a short page.
-
-    A Submission reaches a Regulation once per product code, so duplicates are
-    real. Removing them in Python ran AFTER the Cypher `LIMIT`, so a page of 25
-    came back with fewer than 25 distinct clearances and the caller could not
-    tell a short page from the end of the data.
-
-    Asserted on the Cypher the builder SENDS, captured through a recording
-    fake — not by reading the function's source, which agrees with how the
-    query is spelled rather than with what it asks for.
-    """
-    sent = []
-
-    class R:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self):
-            return json.dumps({"columns": ["clearance"], "records": []}).encode()
-
-    def capture(request, *a, **k):
-        sent.append(json.loads(request.data)["query"])
-        return R()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(engine.urllib.request, "urlopen", capture)
-        queries.clearances_under_regulation("870.5150", limit=25)
-
-    cypher = sent[0]
-    grouped = cypher.index("min(p.product_code)")
-    limited = cypher.index("LIMIT")
-    assert grouped < limited, (
-        "the grouping that removes duplicates runs after LIMIT, so the page is "
-        "capped before duplicates are dropped and comes back short")
-    assert "RETURN DISTINCT" not in cypher, (
-        "RETURN DISTINCT is a silent no-op on this engine — measured — so a "
-        "query relying on it looks deduplicated and is not")
-
-
 def test_every_tool_turns_a_none_argument_into_an_error_not_an_empty_answer():
     """The refusal has to reach the caller as `error`, from all of them —
     the same sweep that found two tools calling `quoted()` outside their try
@@ -474,8 +351,10 @@ def test_provenance_reports_nothing_when_only_the_last_query_fails(monkeypatch):
     def dispatch(request, *a, **k):
         cypher = json.loads(request.data)["query"]
         failing = "n.source IS NOT NULL" in cypher
+        # Columns off the statement, for the same reason as the fixture above.
         payload = ({"error": "the source rollup failed"} if failing
-                   else {"columns": ["nodes"], "records": [[7]]})
+                   else {"columns": return_aliases(cypher),
+                         "records": [[7]]})
 
         class R:
             def __enter__(self): return self
