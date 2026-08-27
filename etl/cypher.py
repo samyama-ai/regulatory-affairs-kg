@@ -97,8 +97,16 @@ def lit(value) -> str:
     # Every control character, not just the three common ones. NUL, vertical
     # tab and form feed reach the parser otherwise, and the engine's response
     # to those is not something to discover during a 54,000-statement load.
-    # U+2028 and U+2029 as well as the C0/C1 ranges: they are line separators,
-    # invisible in an editor, and the parser treats them as it treats a newline.
+    # U+2028 and U+2029 as well, and DEL: they are line separators, invisible
+    # in an editor, and the parser treats them as it treats a newline.
+    #
+    # NOT C1 (U+0080–U+009F). This said "the C0/C1 ranges" and collapsed
+    # neither — measured, `lit("a\x85b")` returns the byte untouched. The
+    # range is left alone deliberately rather than silently: C1 round-trips
+    # through the engine unaltered (measured 2026-08-27), and widening what a
+    # 54,000-statement load rewrites is a change to stored data, not to a
+    # comment. `mcp_server.engine.quoted` refuses C1 on the QUERY side, where
+    # refusing costs nothing, and says so.
     text = "".join(
         " " if ch < " " or ch in ("\x7f", "\u2028", "\u2029") else ch
         for ch in str(value)

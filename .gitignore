@@ -12,3 +12,6 @@ site/
 .env
 .coverage
 htmlcov/
+
+# Local working notes for the assistant, not repo content.
+CLAUDE.md
