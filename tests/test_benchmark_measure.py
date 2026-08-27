@@ -12,7 +12,6 @@ the CLI.
 
 from __future__ import annotations
 
-import inspect
 import json
 
 import pytest
@@ -358,16 +357,50 @@ def test_a_warm_up_round_is_discarded_and_the_median_is_the_median(monkeypatch):
         "disagree by 65%")
 
 
-def test_both_timing_callers_use_the_same_helper():
+def test_neither_timing_caller_keeps_a_loop_of_its_own(monkeypatch):
     """They each kept their own loop, and that is how they drifted apart — one
     measured the same point lookup 65% slower than the other on one page. The
-    warm-up fix has to apply to both or the disagreement returns."""
-    source = inspect.getsource(bench_measure)
-    body = source.split("def timed(")[1]
-    assert body.count("statistics.median(run(") == 0, (
-        "a second timing loop has reappeared alongside `timed()`")
-    assert "timed(" in inspect.getsource(bench_measure.measure)
-    assert "timed(" in inspect.getsource(bench_measure.index_effect)
+    warm-up discard has to apply to both, or the disagreement returns.
+
+    Driven, not read off the source. This asserted
+    `body.count("statistics.median(run(") == 0` and `"timed(" in
+    getsource(...)`, which a second loop defeats by being spelled any other
+    way — and which the words `timed(` appearing in a docstring satisfy. What
+    matters is that no statement is executed for timing OUTSIDE the shared
+    helper, and that is observable: replace both and watch where each
+    statement goes.
+    """
+    through_helper, direct = [], []
+
+    def recording_timed(cypher, url):
+        through_helper.append(cypher)
+        return {"columns": ["c"], "records": [[1]]}, [1.0, 1.0, 1.0]
+
+    def recording_run(cypher, url):
+        direct.append(cypher)
+        return {"columns": ["c"], "records": [[1]]}, 1.0
+
+    monkeypatch.setattr(bench_measure, "timed", recording_timed)
+    monkeypatch.setattr(bench_measure, "run", recording_run)
+    monkeypatch.setattr(bench_measure, "existing_indexes", lambda url: set())
+
+    bench_measure.measure(
+        {"name": "q", "cypher": "MATCH (n:Submission) RETURN count(n) AS c"},
+        "http://engine")
+    bench_measure.index_effect("http://engine", {"Submission": 1})
+
+    assert through_helper, "nothing reached the shared helper at all"
+    assert any("Submission" in cypher for cypher in through_helper), (
+        "the key lookups did not go through `timed()`")
+
+    # Whatever reached `run` directly is setup — creating an index, listing
+    # them — and never a measurement. A statement timed anywhere else is the
+    # second loop this test exists to keep out.
+    for cypher in direct:
+        assert cypher.startswith(("CREATE INDEX", "SHOW ")), (
+            f"{cypher!r} was executed outside `timed()`, so it is timed by a "
+            f"loop of its own — which is how the two callers came to report "
+            f"the same lookup 65% apart")
 
 
 def test_a_version_that_cannot_be_read_stops_the_run(monkeypatch):

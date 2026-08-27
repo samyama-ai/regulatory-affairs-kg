@@ -18,8 +18,15 @@ from benchmarks import run_queries as bench
 from tests.benchmark_support import fake_constraint, fake_stats
 
 
+#: `None` is a MEANING for `constraint` — it is what the probe returns on a
+#: dry run — so it cannot double as "not supplied". Passing `constraint=None`
+#: silently selected the default stub instead, and no test could render the
+#: dry-run arm through this helper at all.
+DEFAULT = object()
+
+
 def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None,
-                indexed_before=None, version=None, constraint=None):
+                indexed_before=None, version=None, constraint=DEFAULT):
     """Patch the three things `report()` calls out to, in one place.
 
     Six render tests set these up by hand, and the block runs to seven lines
@@ -43,7 +50,7 @@ def stub_report(monkeypatch, *, stats=None, measure=None, index_effect=None,
     monkeypatch.setattr(bench, "engine_version", lambda url: version or "1.7.0")
     # Re-derived every run, so a render test has to say what the answer is.
     monkeypatch.setattr(bench, "constraint_indexes", lambda url: (
-        constraint if constraint is not None else fake_constraint()))
+        fake_constraint() if constraint is DEFAULT else constraint))
 
 
 # --------------------------------------------------------------------------
@@ -208,13 +215,25 @@ def test_the_commentary_does_not_type_the_figures_it_quotes():
     text, under a page asserting nothing on it is typed in. Both were correct
     on the day and both go stale on a refresh.
 
-    Matched loosely — any comma-grouped number, or any bare number of four
-    digits or more — because the point is not those two figures, it is that
+    Matched loosely, because the point is not those two figures — it is that
     prose on a generated page should not carry any.
+
+    **Two digits, not four.** This matched comma-grouped numbers and bare
+    numbers of four digits or more, so `19,127` was caught and `531` was not —
+    the second of the two figures the docstring above cites as the reason this
+    test exists. A guard that misses the case it names is worse than no guard,
+    because the name reads as coverage.
+
+    Legal citations are exempted by pattern rather than by digit count.
+    `21 CFR part 870` is not a measurement and does not go stale; excluding it
+    by "numbers under four digits are fine" excluded every measured figure
+    under a thousand with it.
     """
+    citation = re.compile(r"\b21 CFR(?: part)? \d+(?:\.\d+)?", re.IGNORECASE)
     for query in catalogue.QUERIES:
-        typed = re.findall(r"(?<![\d.{])\d{1,3}(?:,\d{3})+(?![\d}])", query["why"])
-        typed += re.findall(r"(?<![\d.{,])\d{4,}(?![\d},])", query["why"])
+        prose = citation.sub("", query["why"])
+        typed = re.findall(r"(?<![\d.{])\d{1,3}(?:,\d{3})+(?![\d}])", prose)
+        typed += re.findall(r"(?<![\d.{,])\d{2,}(?![\d},])", prose)
         assert not typed, (
             f"{query['name']!r} types {typed} into prose the page renders; "
             f"name a measured figure with a placeholder instead")
@@ -279,6 +298,12 @@ def test_the_default_run_says_it_will_change_the_graph_before_it_does(monkeypatc
     warned = capsys.readouterr().err
     assert "CREATES INDEXES" in warned, (
         "the default run mutates the graph and said nothing before doing it")
+    # And it wrote the page. The warning was the only thing asserted, so
+    # `main()` could have printed it and written nothing — which is the one
+    # outcome that looks like a successful run and is not one.
+    assert (tmp_path / "results.md").read_text(encoding="utf-8") == "report body", (
+        "the default run warned about mutating the graph and then did not "
+        "write the page it mutated it for")
 
 
 def test_the_blank_definition_figures_come_from_the_graph(monkeypatch):

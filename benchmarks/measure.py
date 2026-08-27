@@ -250,8 +250,11 @@ def measure(query: dict, url: str) -> dict:
 
 
 # The MERGE keys, and a point lookup on each. Measured before and after an
-# index, because a uniqueness constraint in 1.1.0 declares the key WITHOUT
-# indexing it — so every lookup on a key scans the label.
+# index — which measures what an INDEX is worth on this data, and is a
+# different question from what a CONSTRAINT does. This comment used to answer
+# the second one ("a constraint declares the key WITHOUT indexing it, so every
+# lookup scans the label"), which is the claim `constraint_indexes` measures
+# and this repo's #21 retracts.
 KEYS = [
     ("Submission", "id", "MATCH (s:Submission) WHERE s.id = 'K233820' "
                          "RETURN s.device_name"),

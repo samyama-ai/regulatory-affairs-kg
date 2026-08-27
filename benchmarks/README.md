@@ -7,6 +7,33 @@ correction is silently lost — and it is the one file here where that would
 happen quietly. If a figure on it is wrong, the query that produces it is
 wrong; fix `queries.py`, `measure.py` or `run_queries.py` and re-run.
 
+Nine queries against the loaded graph, with measured timings.
+[`QUERY_RESULTS.md`](QUERY_RESULTS.md) is written by the runner — nothing on it
+is typed in.
+
+**Load from source.** There is no published snapshot — `README.md` and
+`DATASET-CARD.md` both say so, and `data/` is not in the tree, so importing one
+cannot be the primary path:
+
+```bash
+docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+python -m etl.download_openfda      # ~6 min
+python -m etl.load_openfda          # ~10 min
+python -m benchmarks.run_queries
+```
+
+Those two figures come from the root [`README.md`](../README.md), and the load
+is the 598 seconds [`DATASET-CARD.md`](../DATASET-CARD.md) records for 53,811
+statements at ~90/sec — one source each, rather than a third estimate here.
+
+Once a snapshot exists — a release is not cut yet — importing one is faster
+than reloading:
+
+```bash
+curl -X POST http://localhost:8080/api/snapshot/import \
+     -F "file=@data/regulatory-affairs.sgsnap"
+```
+
 ## Layout
 
 | | |
@@ -35,40 +62,10 @@ stderr before it starts.
 `--print` writes to stdout and skips the comparison, so it is a true dry run.
 `--with-index-effect` asks for it anyway.
 
-
-Nine queries against the loaded graph, with measured timings.
-[`QUERY_RESULTS.md`](QUERY_RESULTS.md) is written by the runner — nothing on it
-is typed in.
-
-**Load from source.** There is no published snapshot — `README.md` and
-`DATASET-CARD.md` both say so, and `data/` is not in the tree, so importing one
-cannot be the primary path:
-
-```bash
-docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
-python -m etl.download_openfda      # ~6 min
-python -m etl.load_openfda          # ~10 min
-python -m benchmarks.run_queries
-```
-
-Those two figures come from the root [`README.md`](../README.md), and the load
-is the 598 seconds [`DATASET-CARD.md`](../DATASET-CARD.md) records for 53,811
-statements at ~90/sec. This page used to say 4 and 16 minutes, which agreed
-with neither.
-
-Once a snapshot exists — a release is not cut yet — importing one is faster
-than reloading:
-
-```bash
-curl -X POST http://localhost:8080/api/snapshot/import \
-     -F "file=@data/regulatory-affairs.sgsnap"
-```
-
-**Run it against a fresh instance.** The index comparison below CREATES the
-indexes it measures, so a second run on the same engine compares an indexed
-lookup against an indexed lookup and reports a scan time that is not a scan.
-The runner refuses that rather than printing it, but a fresh engine is the
-only way to get the figures.
+**So the figures need a fresh instance.** A second run on the same engine
+compares an indexed lookup against an indexed lookup; the runner refuses that
+rather than printing a scan time that is not a scan, which means a re-used
+engine yields no comparison at all rather than a wrong one.
 
 ## What it found
 
@@ -89,8 +86,8 @@ timing one indexed lookup against another and calling the difference a speedup.
 The unindexed figures need a fresh instance, and the page says so where the
 dashes are.
 
-Two things made that easy to miss. The claim was written once and never
-re-checked, and the version it was scoped to was read off the **image tag** —
+Two things make a finding like that easy to miss. It is written once and never
+re-checked, and the version it is scoped to is read off the **image tag** —
 every container from `samyama-graph:1.1.0` reports engine **1.7.0** on
 `/api/status`, so "1.1.0" named the tag and read as the engine.
 
@@ -99,12 +96,15 @@ and [`QUERY_RESULTS.md`](QUERY_RESULTS.md) reports whichever answer it finds
 along with the version the engine reported. A finding that can go stale
 silently is one this repo should not be carrying.
 
-**They are not repeated here on purpose.** A measured number copied into a
-second file drifts the moment the first is regenerated, and this table had
-already drifted — it quoted a run whose scan times were a third lower than the
-current ones. One source for a figure, and it is the one a program writes.
+**Every figure lives on [`QUERY_RESULTS.md`](QUERY_RESULTS.md), and none of
+them here.** A measured number copied into a second file drifts the moment the
+first is regenerated — this page once carried a table of scan times a third
+lower than the run beside it. A page whose argument is that its numbers were
+measured cannot carry one that was not. One source per figure, and it is the
+one a program writes; a test fails this file if a timing or a speedup appears
+in it.
 
-**#21 is the issue this retracts.** It was raised on the prose claim and it
+**[#21](https://git.samyama.ai/Samyama.ai/regulatory-affairs-kg/issues/21) is the issue this retracts.** It was raised on the prose claim and it
 reports a cost that nothing is paying: on a graph loaded through `etl/`, those
 keys are indexed by their own constraints. Its table is a real measurement of a
 `CREATE INDEX` against a label that had none — which is not the same question
