@@ -23,6 +23,7 @@ import pytest
 from etl.cypher import SANITISED, identifier, lit, merge, props, split_statements
 from etl.load_openfda import (Engine, load_classifications, load_clearances,
                               select_smoke_rows, unresolvable_joins)
+from tests.mcp_support import sanitised_isolated
 
 SAMYAMA_URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
@@ -608,18 +609,25 @@ def test_the_altered_count_is_not_read_off_the_capped_example_list():
     a separate counter, the report says a load altered 50 values when it
     altered four thousand, and understates in the one place anyone would look.
     """
-    from etl import cypher
+    # Inside the isolation, not a leading and trailing `reset()`. A bare
+    # leading reset destroys whatever ran before rather than saving it, and a
+    # trailing one is skipped when an earlier assert fails — so a regression in
+    # the cap would turn one failure into a cascade across every later test
+    # that reads these. `sanitised_isolated` exists for exactly this and I
+    # wrote this test without it an hour after writing that.
+    with sanitised_isolated() as cypher:
+        for i in range(cypher.SANITISED_CAP * 3):
+            cypher.lit(f"a\tb{i}")
 
-    cypher.reset()
-    for i in range(cypher.SANITISED_CAP * 3):
-        cypher.lit(f"a\tb{i}")
+        assert len(cypher.SANITISED) == cypher.SANITISED_CAP, "the cap did not hold"
+        assert sum(cypher.SANITISED_TOTAL.values()) == cypher.SANITISED_CAP * 3, (
+            "the count was capped along with the examples, so the load report "
+            "understates how many values were altered")
+        assert set(cypher.SANITISED_TOTAL) == {"contains a control character"}
 
-    assert len(cypher.SANITISED) == cypher.SANITISED_CAP, "the cap did not hold"
-    assert sum(cypher.SANITISED_TOTAL.values()) == cypher.SANITISED_CAP * 3, (
-        "the count was capped along with the examples, so the load report "
-        "understates how many values were altered")
-    assert set(cypher.SANITISED_TOTAL) == {"contains a control character"}
-    cypher.reset()
-    assert not cypher.SANITISED and not cypher.SANITISED_TOTAL, (
-        "reset() left one of the two behind, so a process loading twice "
-        "reports the first run's total as the second's")
+        # `reset()` itself, still asserted — it is what the isolation calls,
+        # and a process loading twice reports the first run's total as the
+        # second's if it clears only one of the two.
+        cypher.reset()
+        assert not cypher.SANITISED and not cypher.SANITISED_TOTAL, (
+            "reset() left one of the two behind")

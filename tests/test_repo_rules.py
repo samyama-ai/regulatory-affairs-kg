@@ -15,9 +15,27 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import subprocess
 
-CLIENTS = ["benchmarks/measure.py", "demo/demo.py", "etl/load_openfda.py",
-           "mcp_server/engine.py"]
+import pytest
+
+
+def clients() -> list[str]:
+    """Modules that must not build the request. DISCOVERED, never listed.
+
+    The docstring below says "a fifth module that hand-rolls one is the
+    failure", and a hardcoded list cannot see a fifth module at all — so the
+    claim was not enforced by the test making it.
+
+    Everything tracked is a candidate; `tests/` is excluded because a test may
+    legitimately fake a request in order to drive the transport.
+    """
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=repo(),
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        pytest.skip("not a git checkout")
+    return sorted(n for n in out.stdout.split("\0")
+                  if n.endswith(".py") and not n.startswith("tests/"))
 
 
 def repo() -> pathlib.Path:
@@ -68,15 +86,33 @@ def code_strings(tree: ast.AST) -> list[str]:
     return out
 
 
-def calls_named(tree: ast.AST, name: str) -> bool:
-    """Is `name` actually CALLED anywhere — not merely mentioned."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            called = getattr(func, "id", None) or getattr(func, "attr", None)
-            if called == name:
-                return True
-    return False
+def calls_named(tree: ast.AST, name: str, module: str) -> bool:
+    """Is `name`, IMPORTED FROM `module`, actually called here?
+
+    Both halves matter. Matching any callee with that name counts a local
+    helper someone happened to give the same name — the check would pass for
+    a module that defines its own `post_query` and never talks to the shared
+    one, which is the opposite of what it asserts. And matching the import
+    alone counts a module that imports it and never calls it.
+    """
+    imported = any(
+        isinstance(node, ast.ImportFrom) and node.module == module
+        and any(alias.name == name for alias in node.names)
+        for node in ast.walk(tree))
+    if not imported:
+        # Reached through the module instead — `transport.post_query(...)`.
+        imported = any(
+            isinstance(node, ast.Import)
+            and any(alias.name == module for alias in node.names)
+            for node in ast.walk(tree))
+        if not imported:
+            return False
+
+    return any(
+        isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) == name
+             or getattr(node.func, "attr", None) == name)
+        for node in ast.walk(tree))
 
 
 def test_no_client_builds_the_request_itself():
@@ -87,22 +123,32 @@ def test_no_client_builds_the_request_itself():
     What is asserted is that nobody builds the request themselves. A fifth
     module that hand-rolls one is the failure, whatever it does afterwards.
     """
-    offenders, senders = [], []
-    for name in CLIENTS:
+    offenders, senders = [], set()
+    for name in clients():
+        if name == "etl/transport.py":
+            continue          # the sender itself, which of course builds one
         tree = ast.parse((repo() / name).read_text(encoding="utf-8"))
         if any("/api/query" in text for text in code_strings(tree)):
             offenders.append(name)
-        if calls_named(tree, "post_query"):
-            senders.append(name)
+        if calls_named(tree, "post_query", "etl.transport"):
+            senders.add(name)
 
     assert not offenders, (
         f"{offenders} build the /api/query request themselves. The request is "
         f"`etl.transport.post_query`; what a FAILURE means stays with each "
         f"caller, which is the part that genuinely differs.")
-    assert senders == CLIENTS, (
-        f"only {senders} call post_query. The check above passes for a module "
-        f"that stopped talking to the engine altogether, so it is not evidence "
-        f"on its own.")
+
+    # A SET, and a floor rather than an equality. `senders == CLIENTS` failed
+    # on a reordering, which is not a defect — and it also asserted that
+    # exactly those four talk to the engine, which stops being true the moment
+    # a fifth legitimately does.
+    #
+    # What this is for: the scan above passes for a module that stopped
+    # talking to the engine altogether, so it is not evidence on its own.
+    assert len(senders) >= 4, (
+        f"only {sorted(senders)} call post_query. The scan above passes for a "
+        f"module that no longer talks to the engine at all, so it needs this "
+        f"beside it.")
 
 
 def test_the_shared_sender_decides_nothing_about_failure():
@@ -118,9 +164,16 @@ def test_the_shared_sender_decides_nothing_about_failure():
     its own explanation of what it forbade.
     """
     tree = ast.parse((repo() / "etl" / "transport.py").read_text(encoding="utf-8"))
+    # `ExceptHandler` only. `ast.Try` also matches a bare `try/finally`, which
+    # handles nothing — it guarantees cleanup — so the scan failed a shape it
+    # does not forbid, under a message saying "handles an exception". A guard
+    # whose message misdescribes what it caught sends the next reader to the
+    # wrong place.
     handlers = [node for node in ast.walk(tree)
-                if isinstance(node, (ast.ExceptHandler, ast.Try))]
+                if isinstance(node, ast.ExceptHandler)]
     assert not handlers, (
-        "etl/transport.py handles an exception. Four callers want four "
-        "different things on failure; a sender that decides for them replaces "
-        "four policies with a fifth.")
+        f"etl/transport.py catches "
+        f"{[ast.unparse(h.type) if h.type else 'everything' for h in handlers]}. "
+        f"Four callers want four different things on failure; a sender that "
+        f"decides for them replaces four policies with a fifth. A bare "
+        f"`try/finally` is fine — it decides nothing.")

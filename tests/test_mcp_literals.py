@@ -15,36 +15,10 @@ backslash that two builds reporting the same version disagree about.
 
 from __future__ import annotations
 
-import contextlib
-
 import pytest
 
 from mcp_server import engine
-
-
-@contextlib.contextmanager
-def sanitised_isolated():
-    """Empty both module-level records for the duration, then put them back.
-
-    A CONTEXT MANAGER, with the fixture a two-line wrapper over it, because
-    the save-and-restore has to be testable and a pytest fixture is not
-    callable from a test by any supported route.
-
-    `cypher.reset()` empties `SANITISED` and `SANITISED_TOTAL` in place, so a
-    test calling it discards whatever a caller had accumulated and makes itself
-    order-dependent — and a trailing `reset()` is skipped when an earlier
-    assertion fails, leaking into every test after it.
-    """
-    from etl import cypher
-
-    saved, totals = list(cypher.SANITISED), dict(cypher.SANITISED_TOTAL)
-    cypher.reset()
-    try:
-        yield cypher
-    finally:
-        cypher.SANITISED[:] = saved
-        cypher.SANITISED_TOTAL.clear()
-        cypher.SANITISED_TOTAL.update(totals)
+from tests.mcp_support import sanitised_isolated
 
 
 @pytest.fixture
