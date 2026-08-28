@@ -12,11 +12,9 @@ no engine is reachable.
 """
 
 from __future__ import annotations
-import os
-import urllib.parse
 import pytest
 from mcp_server import engine, queries
-from tests.mcp_support import FIXTURE, configured_test_url, engine_available
+from tests.mcp_support import FIXTURE, writable_test_engine
 
 
 # What this fixture writes, with headroom. The teardown re-checks emptiness and
@@ -56,23 +54,13 @@ def held_or_fail(context: str, allow: int = 0) -> None:
 
 @pytest.fixture
 def loaded_engine(monkeypatch):
-    url = configured_test_url()
-    if not url or not engine_available(url):
-        message = ("no engine at SAMYAMA_TEST_URL"
-                   if not url else f"no engine at {url}")
-        if os.environ.get("SAMYAMA_REQUIRE_ENGINE") == "1":
-            pytest.fail(f"{message} — SAMYAMA_REQUIRE_ENGINE=1 forbids skipping this")
-        pytest.skip(f"{message} — set it to a FRESH instance, never the demo engine")
+    # The selection and both refusals live in `mcp_support` now — this was the
+    # only module that checked the port, and the two that did not are the ones
+    # that wrote into somebody else's graph.
+    url = writable_test_engine("tests/test_mcp_live.py")
 
     # Point the queries at the test engine only for the duration of the test.
     monkeypatch.setenv("SAMYAMA_URL", url)
-
-    # Refused before anything is read. The README says never port 8080 because
-    # that is where a demo engine runs; advisory prose is not a guard.
-    if (urllib.parse.urlparse(url).port or 80) == 8080:
-        pytest.fail(
-            f"SAMYAMA_TEST_URL is {url}. Port 8080 is where a demo engine runs, "
-            f"and these tests DETACH DELETE. Use a different port.")
 
     held_or_fail(f"SAMYAMA_TEST_URL points at {url}")
 

@@ -129,6 +129,32 @@ docker rm -f samyama-reg             # when you are done
 `-rs` matters: the engine-backed tests skip silently without one running, and a
 green run that skipped them proves nothing.
 
+**They skip here on purpose.** The tests that write — probe nodes, schema
+constraints, fixture rows, then `DETACH DELETE` — read `SAMYAMA_TEST_URL`,
+which has no default, so they cannot reach the engine above. That engine is the
+one this quick start just spent sixteen minutes loading, and a stray
+`DETACH DELETE` in it does more than remove what it names (see
+`DATASET-CARD.md` known issue 10). Run them against a throwaway:
+
+```bash
+docker run -d --rm --name samyama-test -p 8299:8080 \
+  public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
+SAMYAMA_TEST_URL=http://localhost:8299 pytest -rs
+docker rm -f samyama-test
+```
+
+Port 8080 is refused outright even if you name it. In CI, add
+`SAMYAMA_REQUIRE_ENGINE=1` so an unreachable engine fails the run instead of
+skipping it — a guard that skips is indistinguishable from one that passes.
+
+Some tests are marked `engine_limitation`: they pin a limitation the loader
+works around and are EXPECTED to fail when the engine gains the ability, with
+the docstring naming the workaround to drop. A failure there is good news, not
+a defect in this repo — `pytest -m "not engine_limitation"` runs clean on any
+build. The distinction matters because two builds reporting the same version
+answer the same query differently (`DATASET-CARD.md` known issue 11), so "this
+engine cannot do X" is not a property of a version number.
+
 That loads **28,496 nodes and 25,310 edges** — all 7,085 device classifications plus every
 21 CFR part 870 (cardiovascular) clearance. Then:
 
