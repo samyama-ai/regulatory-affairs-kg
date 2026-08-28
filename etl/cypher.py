@@ -25,9 +25,109 @@ import re
 # run's total as the second's.
 SANITISED: list[dict] = []
 
+#: How many alterations happened, by reason — exact however large the load.
+#: `SANITISED` holds examples and is capped; this is the figure a report
+#: quotes, and it cannot be read off a truncated list.
+SANITISED_TOTAL: dict[str, int] = {}
+
+#: Examples kept in memory. The load report prints five.
+SANITISED_CAP = 50
+
 
 def reset() -> None:
     SANITISED.clear()
+    SANITISED_TOTAL.clear()
+
+
+class Unrepresentable(Exception):
+    """A value this engine's literal syntax cannot express exactly.
+
+    Carries the reason and the value, because both callers report them: the
+    loader records the substitution it made, and the query side refuses and
+    names the term it would not send.
+    """
+
+    def __init__(self, reason: str, original: str):
+        super().__init__(reason)
+        self.reason = reason
+        self.original = original
+
+
+def _literal(value, altered) -> str:
+    """The literal, with every alteration routed through `altered`.
+
+    ONE implementation, two policies. `altered(reason, original,
+    substitute)` is called wherever this cannot express a value exactly and
+    returns what to use — so `lit()` records and continues while
+    `lit_exact()` raises, and neither re-derives what "exactly" means.
+    """
+    if value is None:
+        return "null"
+    # Numbers and booleans are emitted unquoted. Measured 2026-08-17: the engine
+    # accepts `42` and `true` and preserves the type, and `WHERE n.v > 40`
+    # against a numeric property works — while the same comparison against the
+    # string "42" is a 400. Quoting everything did not merely lose type, it made
+    # numeric filtering impossible. bool is checked first because it subclasses
+    # int in Python.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        # NaN and the infinities have no Cypher literal. `repr()` gives `nan`,
+        # `inf`, `-inf`, which are bare identifiers the parser rejects — a 400
+        # partway through a 54,000-statement load, from a value that looked
+        # ordinary. Recorded and written as null instead, because losing one
+        # value loudly beats failing the run at row 12,000.
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            return altered("no Cypher literal for non-finite float",
+                           repr(value), "null")
+        return repr(value)
+    if isinstance(value, dict):
+        # A dict has no place as a property value, and `str()` on one produces
+        # a Python repr — {'a': 1} — which is not data. Raising beats storing
+        # it: this can only be a caller mistake, and the first row shows it
+        # rather than all 19,127.
+        raise TypeError(
+            f"dict passed to lit(): {str(value)[:80]}. Pick the fields you want "
+            f"rather than storing the block — see how `openfda` is unpacked in "
+            f"load_clearances."
+        )
+    if isinstance(value, (list, tuple)):
+        # openFDA harmonised fields arrive as arrays. str() on one yields a
+        # Python repr — ['a', 'b'] — which is not data. Join instead, and keep
+        # the ordering the API gave.
+        value = "; ".join(str(v) for v in value)
+    # Every control character, not just the three common ones. NUL, vertical
+    # tab and form feed reach the parser otherwise, and the engine's response
+    # to those is not something to discover during a 54,000-statement load.
+    # U+2028 and U+2029 as well, and DEL: they are line separators, invisible
+    # in an editor, and the parser treats them as it treats a newline.
+    #
+    # NOT C1 (U+0080–U+009F). This said "the C0/C1 ranges" and collapsed
+    # neither — measured, `lit("a\x85b")` returns the byte untouched. The
+    # range is left alone deliberately rather than silently: C1 round-trips
+    # through the engine unaltered (measured 2026-08-27), and widening what a
+    # 54,000-statement load rewrites is a change to stored data, not to a
+    # comment. `mcp_server.engine.quoted` refuses C1 on the QUERY side, where
+    # refusing costs nothing, and says so.
+    raw = str(value)
+    text = "".join(
+        " " if ch < " " or ch in ("\x7f", "\u2028", "\u2029") else ch
+        for ch in raw
+    )
+    if text != raw:
+        # Reported, and it never was. `lit()` collapsed these and recorded
+        # nothing, so the one alteration a "refuse anything lit() altered"
+        # invariant could not see was the one that silently changed the term
+        # being matched.
+        text = altered("contains a control character", raw[:200], text)
+
+    if '"' not in text:
+        return f'"{text}"'
+    if "'" not in text:
+        return f"'{text}'"
+
+    return altered("contains both quote types", text[:200],
+                   '"' + text.replace('"', "”") + '"')
 
 
 def lit(value) -> str:
@@ -58,67 +158,54 @@ def lit(value) -> str:
     Newlines and tabs are collapsed to spaces — not for escaping, but because a
     literal newline inside a statement breaks the parser and the engine offers
     no way to encode one.
+
+    Alterations are RECORDED and the substitute used, because a load that
+    stopped at row 12,000 over one unrepresentable value is worse than one
+    that reports two of them. `lit_exact` is this function with the
+    opposite policy.
     """
-    if value is None:
-        return "null"
-    # Numbers and booleans are emitted unquoted. Measured 2026-08-17: the engine
-    # accepts `42` and `true` and preserves the type, and `WHERE n.v > 40`
-    # against a numeric property works — while the same comparison against the
-    # string "42" is a 400. Quoting everything did not merely lose type, it made
-    # numeric filtering impossible. bool is checked first because it subclasses
-    # int in Python.
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        # NaN and the infinities have no Cypher literal. `repr()` gives `nan`,
-        # `inf`, `-inf`, which are bare identifiers the parser rejects — a 400
-        # partway through a 54,000-statement load, from a value that looked
-        # ordinary. Recorded and written as null instead, because losing one
-        # value loudly beats failing the run at row 12,000.
-        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-            SANITISED.append({"original": repr(value), "reason": "no Cypher literal for non-finite float"})
-            return "null"
-        return repr(value)
-    if isinstance(value, dict):
-        # A dict has no place as a property value, and `str()` on one produces
-        # a Python repr — {'a': 1} — which is not data. Raising beats storing
-        # it: this can only be a caller mistake, and the first row shows it
-        # rather than all 19,127.
-        raise TypeError(
-            f"dict passed to lit(): {str(value)[:80]}. Pick the fields you want "
-            f"rather than storing the block — see how `openfda` is unpacked in "
-            f"load_clearances."
-        )
-    if isinstance(value, (list, tuple)):
-        # openFDA harmonised fields arrive as arrays. str() on one yields a
-        # Python repr — ['a', 'b'] — which is not data. Join instead, and keep
-        # the ordering the API gave.
-        value = "; ".join(str(v) for v in value)
-    # Every control character, not just the three common ones. NUL, vertical
-    # tab and form feed reach the parser otherwise, and the engine's response
-    # to those is not something to discover during a 54,000-statement load.
-    # U+2028 and U+2029 as well, and DEL: they are line separators, invisible
-    # in an editor, and the parser treats them as it treats a newline.
-    #
-    # NOT C1 (U+0080–U+009F). This said "the C0/C1 ranges" and collapsed
-    # neither — measured, `lit("a\x85b")` returns the byte untouched. The
-    # range is left alone deliberately rather than silently: C1 round-trips
-    # through the engine unaltered (measured 2026-08-27), and widening what a
-    # 54,000-statement load rewrites is a change to stored data, not to a
-    # comment. `mcp_server.engine.quoted` refuses C1 on the QUERY side, where
-    # refusing costs nothing, and says so.
-    text = "".join(
-        " " if ch < " " or ch in ("\x7f", "\u2028", "\u2029") else ch
-        for ch in str(value)
-    )
+    def record(reason, original, substitute):
+        # COUNTED always, STORED up to a cap.
+        #
+        # Control-character collapses are recorded now and were not before, so
+        # this list can grow with the data rather than with the handful of
+        # both-quote values it used to hold — 456,154 values pass through here
+        # in a full load, and a source that carries a stray tab in every row
+        # would put an entry in memory for each of them, then write them all
+        # into the load report.
+        #
+        # The COUNT is what the report quotes and stays exact; the report
+        # prints five examples, so keeping a few more than that loses nothing
+        # a reader sees. `SANITISED_TOTAL` is per reason, because "how many"
+        # and "of what kind" are the two questions and one number cannot
+        # answer both.
+        SANITISED_TOTAL[reason] = SANITISED_TOTAL.get(reason, 0) + 1
+        if len(SANITISED) < SANITISED_CAP:
+            SANITISED.append({"original": original, "reason": reason})
+        return substitute
 
-    if '"' not in text:
-        return f'"{text}"'
-    if "'" not in text:
-        return f"'{text}'"
+    return _literal(value, record)
 
-    SANITISED.append({"original": text[:200], "reason": "contains both quote types"})
-    return '"' + text.replace('"', "”") + '"'
+
+def lit_exact(value) -> str:
+    """A literal that is EXACTLY the value, or `Unrepresentable`.
+
+    The query side's policy. Writing an altered value is a recorded,
+    reported compromise; MATCHING on one is not — the term compared against
+    is no longer the term asked for, so the query returns no rows and no
+    error, and a caller reads that as "no such record".
+
+    Touches no global and takes no lock, which is the point. Establishing
+    "was this altered?" by reading `len(SANITISED)`, calling `lit()`, then
+    deleting back to the length just read is one module trimming another
+    module's list — and the lock around it only ever covered callers
+    arriving through the first one, while `props` and `merge` append
+    without it.
+    """
+    def refuse(reason, original, substitute):
+        raise Unrepresentable(reason, original)
+
+    return _literal(value, refuse)
 
 
 def split_statements(text: str) -> list[str]:

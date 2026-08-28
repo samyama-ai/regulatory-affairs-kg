@@ -40,7 +40,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from etl import cypher
-from etl.cypher import SANITISED, lit, merge, split_statements
+from etl.cypher import (
+    SANITISED, SANITISED_TOTAL, lit, merge, split_statements)
+from etl.transport import post_query
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCHEMA = Path(__file__).resolve().parent.parent / "schema" / "regulatory_affairs_kg.cypher"
@@ -71,14 +73,14 @@ class Engine:
         """
         if attempts < 1:
             raise ValueError("attempts must be at least 1")
-        payload = json.dumps({"query": query, "graph": self.graph}).encode()
         for attempt in range(attempts):
-            request = urllib.request.Request(
-                f"{self.url}/api/query", data=payload,
-                headers={"Content-Type": "application/json"},
-            )
             try:
-                result = json.loads(urllib.request.urlopen(request, timeout=120).read())
+                # The request comes from `etl.transport.post_query`; the retry
+                # policy below is this loader's alone. A load is a batch nobody
+                # is watching, so a transient failure is worth retrying — the
+                # MCP tools, answering an agent, must not.
+                result, _ = post_query(cypher=query, url=self.url,
+                                       graph=self.graph, timeout=120)
                 break
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode()[:300]
@@ -429,8 +431,13 @@ def main(argv: list[str] | None = None) -> int:
     if clear_counts["no_product_code"]:
         print(f"  {clear_counts['no_product_code']:,} clearances carry no "
               f"product code — no CLASSIFIED_AS edge")
-    if SANITISED:
-        print(f"\n  {len(SANITISED)} value(s) altered to be representable:")
+    altered = sum(SANITISED_TOTAL.values())
+    if altered:
+        # `SANITISED_TOTAL`, not `len(SANITISED)`. The list holds examples and
+        # is capped, so a count read off it reports 50 for a load that altered
+        # four thousand values — and the report is where anyone would look.
+        print(f"\n  {altered:,} value(s) altered to be representable "
+              f"({', '.join(f'{n:,} {r}' for r, n in sorted(SANITISED_TOTAL.items()))}):")
         for record in SANITISED[:5]:
             print(f"    [{record['reason']}] {record['original'][:110]}")
 
@@ -438,11 +445,11 @@ def main(argv: list[str] | None = None) -> int:
     (DATA_DIR / "load-report.json").write_text(
         json.dumps({"measured_at": stamp, "elapsed_seconds": round(elapsed, 1),
                     "statements": engine.statements, "retries": engine.retries,
-                    "sanitised_values": len(SANITISED),
+                    "sanitised_values": altered,
                     "statements_issued": issued,
                     "unresolvable_product_codes": unresolvable, **graph}, indent=2)
     )
-    print(f"\n  report -> data/load-report.json")
+    print("\n  report -> data/load-report.json")
     return 0
 
 

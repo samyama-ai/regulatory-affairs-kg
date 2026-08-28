@@ -18,6 +18,16 @@ from __future__ import annotations
 import pytest
 
 from mcp_server import engine
+from tests.mcp_support import sanitised_isolated
+
+
+@pytest.fixture
+def sanitised_log():
+    """`sanitised_isolated`, as a fixture. The same pattern
+    `tests/test_load_openfda.py` uses, extended to the counter that was added
+    beside the list."""
+    with sanitised_isolated() as cypher:
+        yield cypher
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -205,3 +215,118 @@ def test_a_c1_control_character_is_refused_like_every_other_one():
     assert engine.quoted("a\xa0b"), (
         "U+00A0 is a non-breaking space, not a control character; refusing it "
         "would reject a term a source could legitimately carry")
+
+
+def test_refusing_a_term_touches_no_global_and_takes_no_lock():
+    """`quoted()` used to establish "did `lit()` alter this?" by watching a
+    list another module owns.
+
+    It read `len(SANITISED)`, called `lit()`, then deleted back to the length
+    it had read — under a lock that only covered callers arriving through
+    `engine.py`, while `etl.cypher.props` and `merge` append without one. Safe
+    today only because the loader and the server are separate processes; the
+    ownership was inverted either way.
+
+    `lit_exact` raises instead, so there is nothing to watch and nothing to
+    trim. Asserted on the global rather than on the refusal, because the
+    refusal worked before too — what changed is what it cost.
+    """
+    from etl import cypher
+
+    before = list(cypher.SANITISED)
+    for term in ('a"b\'c', "a\nb", float("inf")):
+        with pytest.raises(engine.Unbounded):
+            engine.quoted(term)
+    assert cypher.SANITISED == before, (
+        "refusing a term left entries in the loader's SANITISED list, or "
+        "removed ones it had already recorded")
+
+    # And a term that IS representable does not record anything either.
+    assert engine.quoted("870.5150")
+    assert cypher.SANITISED == before
+
+    # The list is asserted ABOVE, by watching it across real calls — which is
+    # the whole claim and needs no source reading at all.
+    #
+    # `not hasattr(engine, "_SANITISED_LOCK")` was a guard on spelling: a
+    # rename satisfies it and changes nothing. A substring check on the source
+    # was worse — the docstring explaining why the global is no longer touched
+    # satisfied it in the other direction. And reading the AST for the name
+    # `lit_exact` is the same kind of check one level down, defeated by an
+    # alias. That assertion moved to
+    # `test_quoted_reaches_the_shared_encoder_whatever_it_is_called`, which
+    # replaces the encoder and watches for the call.
+
+
+def test_a_control_character_is_reported_by_the_loader_not_only_refused(sanitised_log):
+    """The hole the watching could never close.
+
+    `lit()` collapsed control characters to a space and recorded NOTHING, so
+    the one alteration `quoted()`'s "refuse anything `lit()` altered"
+    invariant could not see was the one that silently changed the term being
+    matched. Both halves are fixed by the same split: the loader records the
+    collapse, and the query side refuses it.
+    """
+    cypher = sanitised_log
+
+    assert cypher.lit("a\nb") == '"a b"', "the loader still collapses, as it must"
+    assert cypher.SANITISED, (
+        "the loader collapsed a control character and recorded nothing, so a "
+        "load report cannot say it happened")
+    assert "control character" in cypher.SANITISED[-1]["reason"]
+
+    with pytest.raises(engine.Unbounded):
+        engine.quoted("a\nb")
+
+
+def test_the_isolation_puts_back_what_it_found():
+    """Driven with `with`, because the thing under test is the restore.
+
+    Nested deliberately: the outer scope seeds state, the inner one must clear
+    it and give it back untouched. A test of isolation that itself leaves the
+    globals changed would be checking the thing it violates.
+    """
+    from etl import cypher
+
+    seeded = [{"original": "seeded", "reason": "seeded"}]
+    with sanitised_isolated():
+        cypher.SANITISED[:] = list(seeded)
+        cypher.SANITISED_TOTAL["seeded"] = 7
+
+        with sanitised_isolated() as inner:
+            assert inner.SANITISED == [] and inner.SANITISED_TOTAL == {}, (
+                "it did not clear, so a test reads whatever ran before it")
+            inner.lit("a\tb")
+            assert inner.SANITISED and inner.SANITISED_TOTAL
+
+        assert cypher.SANITISED == seeded, "the list it found was not restored"
+        assert cypher.SANITISED_TOTAL == {"seeded": 7}, (
+            "the counter was added beside the list and not restored with it")
+
+
+def test_quoted_reaches_the_shared_encoder_whatever_it_is_called(monkeypatch):
+    """Asserted by CALLING it, not by reading the source for a name.
+
+    `"lit_exact" in called` searched the AST for that identifier, which an
+    alias — `from etl.cypher import lit_exact as encode` — or an indirect call
+    defeats silently. This replaces `engine.lit_exact` and watches for the
+    call, so the encoder actually running is what is asserted.
+
+    That does make `engine.lit_exact` a contract rather than an implementation
+    detail: `from X import Y` copies the reference, so a test cannot reach
+    past the name the importing module binds. Importing it under a different
+    name fails here deliberately — the two encoders must be swappable from one
+    place, and an alias is a second place. Rename it in both if it should
+    change.
+    """
+    asked = []
+
+    def recorder(value):
+        asked.append(value)
+        return chr(34) + str(value) + chr(34)
+
+    monkeypatch.setattr(engine, "lit_exact", recorder)
+    assert engine.quoted("870.5150") == chr(34) + "870.5150" + chr(34)
+    assert asked == ["870.5150"], (
+        "quoted() did not go through the shared encoder, so the two would "
+        "drift about what a representable value is")

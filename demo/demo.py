@@ -14,12 +14,11 @@ so if the load is wrong the demo shows it rather than hiding it.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-import time
 import urllib.error
-import urllib.request
+
+from etl.transport import post_query
 
 URL = os.environ.get("SAMYAMA_URL", "http://localhost:8080")
 
@@ -29,14 +28,14 @@ BOLD, DIM, CYAN, GREEN, YELLOW, RED, OFF = (
 
 
 def query(cypher: str) -> tuple[dict, float]:
-    request = urllib.request.Request(
-        URL + "/api/query",
-        data=json.dumps({"query": cypher}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    started = time.perf_counter()
+    """One statement, or a printed message and exit 1.
+
+    The request comes from `etl.transport.post_query`; what a failure means is
+    decided here. A demo runs in front of people, so a failure prints in colour
+    and stops rather than raising a traceback over the slide.
+    """
     try:
-        result = json.loads(urllib.request.urlopen(request, timeout=180).read())
+        result, elapsed = post_query(cypher=cypher, url=URL, timeout=180)
     except urllib.error.HTTPError as exc:
         # HTTPError subclasses URLError, so it must be caught first — otherwise a
         # 500 from a running engine is reported as "no engine", which is the one
@@ -46,7 +45,7 @@ def query(cypher: str) -> tuple[dict, float]:
     except urllib.error.URLError as exc:
         print(f"\n  {RED}no engine at {URL}{OFF} — {exc.reason}\n")
         sys.exit(1)
-    return result, (time.perf_counter() - started) * 1000
+    return result, elapsed
 
 
 def table(columns: list[str], records: list[list]) -> None:
