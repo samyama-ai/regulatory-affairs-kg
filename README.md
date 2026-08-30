@@ -7,6 +7,21 @@ conformity evidence, market registrations and post-market surveillance.**
 > This repo holds the loader and source-data specifics for the KG.
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
+<a href="https://huggingface.co/datasets/VaidhyaMegha/regulatory-affairs-kg"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20dataset-VaidhyaMegha%2Fregulatory--affairs--kg-yellow" alt="HuggingFace dataset"></a>
+
+**The loaded slice is published as a dataset** — you do not have to re-download from openFDA:
+**[huggingface.co/datasets/VaidhyaMegha/regulatory-affairs-kg](https://huggingface.co/datasets/VaidhyaMegha/regulatory-affairs-kg)**
+(`v1.0`). 28,520 nodes and 25,332 edges as node/edge CSVs, plus `regulatory-affairs.sgsnap`.
+
+```python
+from datasets import load_dataset
+clearances = load_dataset("VaidhyaMegha/regulatory-affairs-kg", "submission", revision="v1.0")
+```
+
+> Everything loaded is published — all sources are openFDA, US Government public domain, and
+> no ISO/IEC standards text is stored (the schema keeps designations only). The dataset is a
+> point-in-time capture: **retrieved 2026-08-29**, giving 28,520 / 25,332 against the 28,496 /
+> 25,310 recorded here, because openFDA is live and gained records in between.
 
 > **A bounded slice is loaded and measured — 28,496 nodes, 25,310 edges.** Predicate chains
 > are designed but not loaded; the source data for them is not in the FDA's API. Counts,
