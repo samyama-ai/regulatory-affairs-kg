@@ -112,6 +112,21 @@ def _bytes_claimed(text: str) -> set[int]:
                 text)}
 
 
+def _rounded_only(text: str) -> str | None:
+    """A size stated in megabytes with no byte figure beside it.
+
+    Megabytes are ambiguous by 5% between the decimal and binary readings, and
+    quoting one while a reader assumes the other is how "2.2" survived three
+    revisions. So a document stating only a rounded size is not "stating no
+    size" — it is stating a claim this check cannot verify, and it must fail
+    rather than skip.
+    """
+    if _bytes_claimed(text):
+        return None
+    found = re.search(r"\*{0,2}\d+(?:\.\d+)?\s*M(?:i)?B", text)
+    return found.group(0) if found else None
+
+
 def _says_unpublished(text: str) -> list[str]:
     """Which "there is no release" phrasings a document still carries.
 
@@ -155,12 +170,12 @@ def test_every_document_states_the_size_the_release_has(document, release):
         # drifted — "2.2 MB" is a claim, and skipping it let a reverted
         # document pass. Skipping is for a document that states no size at
         # all.
-        rounded = re.search(r"\*{0,2}\d+(?:\.\d+)?\s*M(?:i)?B", text)
+        rounded = _rounded_only(text)
         assert not rounded, (
-            f"{document.relative_to(ROOT)} states a size as "
-            f"{rounded.group(0)!r} and no byte figure. Megabytes are ambiguous "
-            f"by 5% between the decimal and binary readings, which is how 2.2 "
-            f"survived three revisions — state the bytes.")
+            f"{document.relative_to(ROOT)} states a size as {rounded!r} and no "
+            f"byte figure. Megabytes are ambiguous by 5% between the decimal "
+            f"and binary readings, which is how 2.2 survived three revisions "
+            f"— state the bytes.")
         # The RELATIVE path. Two files here are called README.md, and a skip
         # naming only "README.md" sent me looking at the wrong one.
         pytest.skip(f"{document.relative_to(ROOT)} states no size at all")
@@ -380,3 +395,54 @@ def test_the_document_checks_do_not_need_the_network(monkeypatch):
         assert not _says_unpublished(text), document.relative_to(ROOT)
         claimed = _bytes_claimed(text)
         assert claimed in ({facts["size"]}, set()), document.relative_to(ROOT)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("**2.2 MB**", "**2.2 MB"),
+    ("the file is 2.11 MB", "2.11 MB"),
+    ("2.01 MiB on disk", "2.01 MiB"),
+    # A byte figure present, so the rounded one beside it is fine.
+    ("**2,107,181 bytes** (2.11 MB)", None),
+    ("no size at all here", None),
+])
+def test_a_rounded_size_without_bytes_is_a_claim_not_an_absence(text, expected):
+    """Skipping a megabytes-only document let the reverted one pass.
+
+    `demo/README.md` said "2.2 MB" and no bytes. The size check skipped it —
+    the exact document, with the exact wrong number this PR exists to remove,
+    reported as "states no byte figure" and passed over.
+    """
+    got = _rounded_only(text)
+    assert (got == expected) if expected is None else (expected in got)
+
+
+def test_this_file_still_runs_its_real_checks_without_a_token():
+    """The regression that would undo this PR without failing anything.
+
+    Pointing `release` back at the API turns ten assertions into skips and
+    leaves the run green — a silent skip indistinguishable from a pass, which
+    is the failure this file was written about. Counted in a subprocess with
+    no token, the way CI sees it.
+
+    Two skips are expected and named: `benchmarks/README.md` states no size,
+    and the live reconciliation needs the network.
+    """
+    import subprocess as sp
+
+    target = Path(__file__).resolve().relative_to(ROOT).as_posix()
+    env = {k: v for k, v in os.environ.items() if k != "GITEA_TOKEN"}
+    run = sp.run([sys.executable, "-m", "pytest", "-q", "--no-header",
+                  "-p", "no:cacheprovider", target,
+                  "--deselect", f"{target}::"
+                  "test_this_file_still_runs_its_real_checks_without_a_token"],
+                 capture_output=True, text=True, cwd=str(ROOT),
+                 env=env, timeout=180)
+    summary = [line for line in run.stdout.splitlines()
+               if " passed" in line or " failed" in line]
+    assert summary, f"no summary line:\n{run.stdout[-800:]}"
+    skipped = re.search(r"(\d+) skipped", summary[-1])
+    count = int(skipped.group(1)) if skipped else 0
+    assert count <= 2, (
+        f"{count} tests skipped without a token — the document checks have "
+        f"gone back to needing one, and a skip is indistinguishable from a "
+        f"pass:\n{summary[-1]}")
