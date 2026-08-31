@@ -204,7 +204,7 @@ pyproject.toml
 | **Graph loaded** | ✅ **28,496 nodes, 25,310 edges** — a bounded slice |
 | Predicate chains | ⬜ need PDF extraction; resolution rate unmeasured |
 | **Demo** | ✅ six questions, sub-25 ms, every number read at run time |
-| Snapshot | 🟢 **2,107,181 bytes** (2.11 MB) `.sgsnap` v2, published as [`snapshot-2026-08-24`](https://git.samyama.ai/Samyama.ai/regulatory-affairs-kg/releases) — imports in 0.54 s |
+| Snapshot | ✅ **2,107,181 bytes** (2.11 MB) `.sgsnap` v2, published as [`snapshot-2026-08-24`](https://git.samyama.ai/Samyama.ai/regulatory-affairs-kg/releases) — imports in 0.54 s |
 | Query suite | ✅ nine measured queries, and a page the runner writes |
 
 ## License

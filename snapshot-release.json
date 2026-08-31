@@ -1,0 +1,5 @@
+{
+  "tag": "snapshot-2026-08-24",
+  "size": 2107181,
+  "_": "Committed so the document checks run without a token. Refresh with the live test in tests/test_snapshot_release.py, which diffs this against the releases API."
+}
