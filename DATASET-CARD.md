@@ -286,9 +286,8 @@ python -m etl.load_openfda
 That produces the 28,496 nodes and 25,310 edges reported above, and writes
 `data/load-report.json` with the measured counts.
 
-**No release exists yet**, so there is nowhere to fetch it from — the load above
-is one route in. Importing the published snapshot takes 0.54 seconds against
-that ten minutes:
+The load above is one route in. Importing the published snapshot takes 0.54
+seconds against that ten minutes:
 
 ```bash
 # download regulatory-affairs.sgsnap from the repository's Releases page

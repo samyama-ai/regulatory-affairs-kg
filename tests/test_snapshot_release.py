@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -33,8 +34,13 @@ RELEASES = ("https://git.samyama.ai/api/v1/repos/Samyama.ai/"
 ASSET = "regulatory-affairs.sgsnap"
 
 
-def _release() -> dict | None:
-    """The newest release carrying the snapshot, or `None` if unreachable.
+def _release() -> dict | str:
+    """The release carrying the snapshot, or a string saying why not.
+
+    A STRING rather than `None`, because three different things landed on that
+    one value: unauthorised, offline, and the release genuinely deleted. The
+    third is the failure this file exists to catch, and a skip reason that
+    cannot tell it from a missing token hides exactly the case worth seeing.
 
     A token is used when one is in the environment and omitted otherwise: the
     repository is private today, so an unauthenticated run cannot see the
@@ -48,21 +54,28 @@ def _release() -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             releases = json.loads(response.read())
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        return (f"the releases API could not be read ({exc!r}) — set "
+                f"GITEA_TOKEN, or check the network")
     for release in releases:
         for asset in release.get("assets", []):
             if asset.get("name") == ASSET:
                 return {"tag": release["tag_name"], "size": asset["size"]}
-    return None
+    # Reached the API and it answered. No release carries the asset, which is
+    # not a skip: it is the documents describing something that is not there.
+    return "REACHED"
 
 
 @pytest.fixture(scope="module")
 def release() -> dict:
     found = _release()
-    if found is None:
-        pytest.skip("the releases API is unreachable or unauthorised — set "
-                    "GITEA_TOKEN to check the documents against the release")
+    if found == "REACHED":
+        pytest.fail(
+            f"the releases API answered and no release carries {ASSET}. The "
+            f"documents describe a published snapshot that is not there — "
+            f"this is the failure this file exists to catch, not a skip.")
+    if isinstance(found, str):
+        pytest.skip(found)
     return found
 
 
@@ -74,13 +87,17 @@ def _bytes_claimed(text: str) -> set[int]:
     drift past. Written with thousands separators, which is how a reader can
     tell 2,107,181 bytes from a rounded 2.1 MB at a glance.
 
+    The pattern spells out grouped thousands rather than "digits and commas":
+    the looser form accepted `2,,107,181` and then stripped the commas before
+    `int()`, so a malformed figure would have compared equal to a correct one.
+
     The emphasis is allowed to fall either side of the word — `**N bytes**`
     and `**N** bytes` both read the same and both appear here. Pinning one
     made this report "states no byte figure" about a document that states it,
     which is a false failure and the fastest way to get a check deleted.
     """
     return {int(m.replace(",", ""))
-            for m in re.findall(r"([\d,]{7,})\s*(?:\*\*)?\s*bytes", text)}
+            for m in re.findall(r"(\d{1,3}(?:,\d{3})+)\s*(?:\*\*)?\s*bytes", text)}
 
 
 def test_the_documents_state_the_size_the_release_actually_has(release):
@@ -108,9 +125,13 @@ def test_no_document_still_says_the_snapshot_is_unpublished(release):
     the second one is.
     """
     for document in (README, CARD):
-        text = document.read_text(encoding="utf-8")
+        # LOWERCASED. The card wrote "**No release exists yet**" at the start
+        # of a sentence, and a case-sensitive check walked past the live
+        # instance of the exact string it names — the one thing this test is
+        # for. Prose capitalises; a phrase check has to not care.
+        lowered = document.read_text(encoding="utf-8").lower()
         for phrase in ("not yet published", "no release exists"):
-            assert phrase not in text, (
+            assert phrase not in lowered, (
                 f"{document.name} still says {phrase!r}, but "
                 f"{release['tag']} exists and carries {ASSET}")
 
@@ -125,3 +146,70 @@ def test_the_documents_name_the_release_that_holds_it(release):
         assert release["tag"] in document.read_text(encoding="utf-8"), (
             f"{document.name} does not name {release['tag']}, the release "
             f"carrying the snapshot it describes")
+
+
+def _says_unpublished(text: str) -> list[str]:
+    """The phrase check, over arbitrary text.
+
+    Extracted so it can be exercised against a document that DOES carry the
+    phrase. The parametrised checks above run over the real files, which no
+    longer do — so making the check case-sensitive again passes them, and the
+    mutation that reintroduces the original defect survives a test written to
+    catch it.
+    """
+    lowered = text.lower()
+    return [p for p in ("not yet published", "no release exists") if p in lowered]
+
+
+@pytest.mark.parametrize("spelling", [
+    "**No release exists yet**, so there is nowhere to fetch it from.",
+    "no release exists yet",
+    "The snapshot is Not Yet Published.",
+    "NOT YET PUBLISHED",
+])
+def test_the_phrase_check_does_not_care_about_capitals(spelling):
+    """The card wrote it capitalised at the start of a sentence.
+
+    `assert phrase not in text` walked past the live instance of the exact
+    string it names — the single thing this file exists to catch, missed by
+    the check written to catch it. Prose capitalises; a phrase check must not
+    care.
+    """
+    assert _says_unpublished(spelling), (
+        f"the check misses {spelling!r} — it will miss it in the document too")
+
+
+def test_a_document_that_says_neither_is_clean():
+    """The false-positive direction. A check that flags everything gets
+    switched off as fast as one that flags nothing."""
+    assert _says_unpublished(
+        "The snapshot is published as snapshot-2026-08-24.") == []
+
+
+def test_a_deleted_release_fails_rather_than_skips(monkeypatch):
+    """The one failure this file exists to catch must not look like a skip.
+
+    `None` meant unauthorised, offline, and "the release is gone" all at once.
+    The third is the case worth seeing, and a skip reason covering all three
+    hides it behind the two that are ordinary.
+
+    Caught as `pytest.fail.Exception`, not `Exception`. Both `fail` and `skip`
+    raise `BaseException` subclasses, so `pytest.raises(Exception)` does not
+    catch either — the first version of this test failed, and its sibling
+    below SKIPPED ITSELF, which is the same trap one level up.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_release", lambda: "REACHED")
+    with pytest.raises(pytest.fail.Exception, match="not there"):
+        release.__wrapped__()
+
+
+def test_an_unreachable_api_skips_and_says_why(monkeypatch):
+    """And the ordinary cases stay skips, with the reason surfaced.
+
+    The underlying exception is in the message: "unauthorised" and "the host
+    is down" need different responses from whoever reads the log.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_release",
+                        lambda: "the releases API could not be read (boom)")
+    with pytest.raises(pytest.skip.Exception, match="could not be read"):
+        release.__wrapped__()
