@@ -87,9 +87,12 @@ def _bytes_claimed(text: str) -> set[int]:
     drift past. Written with thousands separators, which is how a reader can
     tell 2,107,181 bytes from a rounded 2.1 MB at a glance.
 
-    The pattern spells out grouped thousands rather than "digits and commas":
-    the looser form accepted `2,,107,181` and then stripped the commas before
-    `int()`, so a malformed figure would have compared equal to a correct one.
+    The pattern spells out grouped thousands rather than "digits and commas",
+    and is BOUNDED on both sides. Spelling out the grouping alone was not
+    enough: against `2,,107,181` it matched the `107,181` inside and reported a
+    number the document does not state — quieter than the looser form it
+    replaced, and worse, because a wrong figure now had a plausible value. The
+    lookarounds stop a match beginning or ending mid-figure.
 
     The emphasis is allowed to fall either side of the word — `**N bytes**`
     and `**N** bytes` both read the same and both appear here. Pinning one
@@ -97,7 +100,9 @@ def _bytes_claimed(text: str) -> set[int]:
     which is a false failure and the fastest way to get a check deleted.
     """
     return {int(m.replace(",", ""))
-            for m in re.findall(r"(\d{1,3}(?:,\d{3})+)\s*(?:\*\*)?\s*bytes", text)}
+            for m in re.findall(
+                r"(?<![\d,])(\d{1,3}(?:,\d{3})+)(?![\d,])\s*(?:\*\*)?\s*bytes",
+                text)}
 
 
 def test_the_documents_state_the_size_the_release_actually_has(release):
@@ -199,8 +204,20 @@ def test_a_deleted_release_fails_rather_than_skips(monkeypatch):
     below SKIPPED ITSELF, which is the same trap one level up.
     """
     monkeypatch.setattr(sys.modules[__name__], "_release", lambda: "REACHED")
-    with pytest.raises(pytest.fail.Exception, match="not there"):
+    # NOT `pytest.raises`. If the fixture skips instead of failing — which is
+    # the regression this guards — the `Skipped` escapes `raises` and skips
+    # THIS test, reporting green. Caught by hand so the outcome can be named.
+    try:
         release.__wrapped__()
+    except BaseException as raised:          # noqa: BLE001 — the type is the assertion
+        outcome = raised
+    else:
+        outcome = None
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"a deleted release produced {type(outcome).__name__} — it must FAIL. "
+        f"A skip here is indistinguishable from a missing token, and this is "
+        f"the one case the file exists to catch.")
+    assert "not there" in str(outcome)
 
 
 def test_an_unreachable_api_skips_and_says_why(monkeypatch):
@@ -211,5 +228,32 @@ def test_an_unreachable_api_skips_and_says_why(monkeypatch):
     """
     monkeypatch.setattr(sys.modules[__name__], "_release",
                         lambda: "the releases API could not be read (boom)")
-    with pytest.raises(pytest.skip.Exception, match="could not be read"):
+    try:
         release.__wrapped__()
+    except BaseException as raised:          # noqa: BLE001
+        outcome = raised
+    else:
+        outcome = None
+    assert isinstance(outcome, pytest.skip.Exception), (
+        f"an unreachable API produced {type(outcome).__name__} — it must skip")
+    assert "could not be read" in str(outcome)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("**2,107,181 bytes**", {2107181}),
+    ("2,107,181 bytes", {2107181}),
+    ("**2,107,181** bytes", {2107181}),
+    # Malformed. The looser pattern accepted these and stripped the commas
+    # before `int()`, so a mistyped figure compared EQUAL to a correct one and
+    # the check passed on a document stating nonsense.
+    ("2,,107,181 bytes", set()),
+    ("2107181 bytes", set()),
+    ("2,10,181 bytes", set()),
+])
+def test_only_a_properly_grouped_figure_is_read_as_a_size(text, expected):
+    """`\d{1,3}(?:,\d{3})+` says what the check means.
+
+    `[\d,]{7,}` said "digits and commas, at least seven of them", which is a
+    description of the characters rather than of a number.
+    """
+    assert _bytes_claimed(text) == expected
