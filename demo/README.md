@@ -10,9 +10,9 @@ docker run --rm -p 8080:8080 public.ecr.aws/f9f6l5u4/samyama-graph:1.1.0
 python -m etl.download_openfda
 python -m etl.load_openfda
 
-# … or, once a release exists, import the snapshot (0.54 s, measured).
+# … or import the published snapshot (0.54 s, measured).
 # Download regulatory-affairs.sgsnap from the Releases page first —
-# no release is published yet, so this route is not available.
+# published as snapshot-2026-08-24.
 curl -X POST http://localhost:8080/api/snapshot/import \
      -F "file=@regulatory-affairs.sgsnap"
 
@@ -74,8 +74,10 @@ agg demo/regulatory-affairs.cast demo/regulatory-affairs.gif
 
 ## Snapshot
 
-`data/regulatory-affairs.sgsnap` — **2.2 MB**, 28,496 nodes, 25,310 edges,
-`.sgsnap` v2. Produced by `POST /api/snapshot/export` after a full load.
+`data/regulatory-affairs.sgsnap` — **2,107,181 bytes** (2.11 MB), 28,496
+nodes, 25,310 edges, `.sgsnap` v2. Produced by `POST /api/snapshot/export`
+after a full load.
 
-Not committed: `data/` is gitignored and raw data never enters a KG repo.
-It belongs on a release, which is how the sibling KGs distribute theirs.
+Not committed: `data/` is gitignored and raw data never enters a KG repo. It
+ships as a release asset, published as `snapshot-2026-08-24`, which is how the
+sibling KGs distribute theirs.

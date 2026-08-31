@@ -28,7 +28,7 @@ badly.
 | **Source datasets** | 8 openFDA endpoints measured; 10 further sources identified, not yet researched |
 | **Schema** | Two tiers — see [`schema/regulatory_affairs_kg.cypher`](schema/regulatory_affairs_kg.cypher); the rationale for each shape is inline |
 | **Engine** | Samyama-Graph OSS 1.1.0 |
-| **Snapshot format** | `.sgsnap` v2 — **2.2 MB**, imports in 0.54 s; **not yet published** |
+| **Snapshot format** | `.sgsnap` v2 — **2,107,181 bytes** (2.11 MB), imports in 0.54 s; published as `snapshot-2026-08-24` |
 | **Build hardware** | Local Docker, Samyama-Graph 1.1.0; load took 598s (53,811 statements, ~90/sec) — see *Statement count* below |
 | **License** | per-source (see table); raw rows not committed |
 | **Date** | sources measured 2026-08-06; schema verified against the engine 2026-08-11; **graph loaded and counted 2026-08-12** |
@@ -286,8 +286,7 @@ python -m etl.load_openfda
 That produces the 28,496 nodes and 25,310 edges reported above, and writes
 `data/load-report.json` with the measured counts.
 
-**No release exists yet**, so there is nowhere to fetch it from — the load above
-is currently the only route in. Once one is published, importing it takes 0.54
+The load above is one route in. Importing the published snapshot takes 0.54
 seconds against that ten minutes:
 
 ```bash
@@ -298,9 +297,10 @@ curl -X POST http://localhost:8080/api/snapshot/import \
 python -m demo.demo          # six questions, every number read at run time
 ```
 
-2.2 MB, `.sgsnap` v2, the same 28,496 nodes and 25,310 edges. **Not committed** —
-`data/` is gitignored and a KG repo takes no binaries — so it ships as a release
-asset. The demo's `.cast` and `.gif` are committed —
+**2,107,181 bytes** (2.11 MB, or 2.01 MiB — stated in bytes because the two
+conventions disagree by 5% and both appear in the wild), `.sgsnap` v2, the same
+28,496 nodes and 25,310 edges. **Not committed** — `data/` is gitignored and a
+KG repo takes no binaries — so it ships as a release asset. The demo's `.cast` and `.gif` are committed —
 they are how the README shows the demo working.
 
 ## ⚠️ Limitations
