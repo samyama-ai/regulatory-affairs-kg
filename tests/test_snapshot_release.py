@@ -148,11 +148,22 @@ def test_every_document_states_the_size_the_release_has(document, release):
     Bytes rather than megabytes: the two disagree by 5% and both appear in the
     wild, which is how "2.2" survived three revisions.
     """
-    claimed = _bytes_claimed(document.read_text(encoding="utf-8"))
+    text = document.read_text(encoding="utf-8")
+    claimed = _bytes_claimed(text)
     if not claimed:
+        # A document stating a size ONLY in megabytes is the exact shape that
+        # drifted — "2.2 MB" is a claim, and skipping it let a reverted
+        # document pass. Skipping is for a document that states no size at
+        # all.
+        rounded = re.search(r"\*{0,2}\d+(?:\.\d+)?\s*M(?:i)?B", text)
+        assert not rounded, (
+            f"{document.relative_to(ROOT)} states a size as "
+            f"{rounded.group(0)!r} and no byte figure. Megabytes are ambiguous "
+            f"by 5% between the decimal and binary readings, which is how 2.2 "
+            f"survived three revisions — state the bytes.")
         # The RELATIVE path. Two files here are called README.md, and a skip
         # naming only "README.md" sent me looking at the wrong one.
-        pytest.skip(f"{document.relative_to(ROOT)} states no byte figure")
+        pytest.skip(f"{document.relative_to(ROOT)} states no size at all")
     assert claimed == {release["size"]}, (
         f"{document.relative_to(ROOT)} claims {sorted(claimed)} bytes; the "
         f"release asset is {release['size']:,}")
@@ -342,3 +353,30 @@ def test_a_non_list_response_skips_rather_than_erroring(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response())
     assert isinstance(_live_release(), str)
+
+
+def test_the_document_checks_do_not_need_the_network(monkeypatch):
+    """The regression that would quietly undo this whole PR.
+
+    Pointing the `release` fixture back at the API does not FAIL anything — it
+    turns ten assertions into skips, and the run stays green. That is the
+    failure this file was written about, wearing the file's own clothes.
+
+    So it is asserted directly: with every route to the network broken, the
+    document checks still have their facts.
+    """
+    def exploded(*_a, **_k):
+        raise AssertionError("the document checks reached the network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", exploded)
+    monkeypatch.setattr(sys.modules[__name__], "_live_release", exploded)
+
+    facts = json.loads(RECORD.read_text(encoding="utf-8"))
+    assert facts["tag"] and facts["size"], "the record carries no facts"
+
+    # And every document check can run against them, offline.
+    for document in DOCUMENTS:
+        text = document.read_text(encoding="utf-8")
+        assert not _says_unpublished(text), document.relative_to(ROOT)
+        claimed = _bytes_claimed(text)
+        assert claimed in ({facts["size"]}, set()), document.relative_to(ROOT)
